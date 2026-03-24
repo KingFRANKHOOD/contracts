@@ -2,8 +2,6 @@
 #![allow(deprecated)]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Bytes, BytesN, Env, Map, String,
-    Vec,
     contract, contractimpl, contracttype, symbol_short, token, Address, Bytes, BytesN, Env, Map,
     String, Vec,
 };
@@ -54,7 +52,6 @@ pub enum DataKey {
     MedicalRecords(Address),
     AuthorizedDoctors(Address),
     RegulatoryHold(Address),
-    Admin,
     ConsentVersion,
     ConsentAck(Address),
     Guardian(Address),
@@ -64,6 +61,7 @@ pub enum DataKey {
     RecordFee,
     Treasury,
     FeeToken,
+    TotalPatients,
 }
 
 #[contracttype]
@@ -81,6 +79,8 @@ pub struct RegulatoryHold {
     pub reason_hash: BytesN<32>,
     pub expires_at: u64,
     pub placed_at: u64,
+}
+
 fn require_patient_or_guardian(env: &Env, patient: &Address, caller: &Address) {
     let guardian_key = DataKey::Guardian(patient.clone());
     let guardian_opt: Option<Address> = env.storage().persistent().get(&guardian_key);
@@ -98,22 +98,6 @@ pub struct MedicalRegistry;
 
 #[contractimpl]
 impl MedicalRegistry {
-    pub fn initialize(env: Env, admin: Address) {
-        if env.storage().persistent().has(&DataKey::Admin) {
-            panic!("Contract already initialized");
-        }
-
-        admin.require_auth();
-        env.storage().persistent().set(&DataKey::Admin, &admin);
-
-        env.events()
-            .publish((symbol_short!("init"), admin), symbol_short!("success"));
-    }
-
-    // =====================================================
-    //                    ADMIN / CONSENT
-    // =====================================================
-
     pub fn initialize(env: Env, admin: Address, treasury: Address, fee_token: Address) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic!("Already initialized");
@@ -122,7 +106,12 @@ impl MedicalRegistry {
         env.storage().instance().set(&DataKey::Treasury, &treasury);
         env.storage().instance().set(&DataKey::FeeToken, &fee_token);
         env.storage().instance().set(&DataKey::RecordFee, &0i128);
+        env.storage().instance().set(&DataKey::TotalPatients, &0u64);
     }
+
+    // =====================================================
+    //                    ADMIN / CONSENT
+    // =====================================================
 
     pub fn set_record_fee(env: Env, amount: i128) {
         let admin: Address = env
@@ -259,6 +248,14 @@ impl MedicalRegistry {
             metadata,
         };
         env.storage().persistent().set(&key, &patient);
+        let total_patients: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalPatients)
+            .unwrap_or(0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalPatients, &(total_patients + 1));
 
         let mut pat_list: Vec<Address> = env
             .storage()
@@ -272,11 +269,16 @@ impl MedicalRegistry {
             .publish((symbol_short!("reg_pat"), wallet), symbol_short!("success"));
     }
 
-    pub fn update_patient(env: Env, wallet: Address, metadata: String) {
-        wallet.require_auth();
-        Self::require_not_on_hold(&env, &wallet);
+    pub fn get_total_patients(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::TotalPatients)
+            .unwrap_or(0u64)
+    }
+
     pub fn update_patient(env: Env, wallet: Address, caller: Address, metadata: String) {
         require_patient_or_guardian(&env, &wallet, &caller);
+        Self::require_not_on_hold(&env, &wallet);
 
         let key = DataKey::Patient(wallet.clone());
         let mut patient: PatientData = env
@@ -442,11 +444,9 @@ impl MedicalRegistry {
     //            MEDICAL RECORD ACCESS CONTROL
     // =====================================================
 
-    pub fn grant_access(env: Env, patient: Address, doctor: Address) {
-        patient.require_auth();
-        Self::require_not_on_hold(&env, &patient);
     pub fn grant_access(env: Env, patient: Address, caller: Address, doctor: Address) {
         require_patient_or_guardian(&env, &patient, &caller);
+        Self::require_not_on_hold(&env, &patient);
 
         let key = DataKey::AuthorizedDoctors(patient.clone());
         let mut map: Map<Address, bool> = env
@@ -459,11 +459,9 @@ impl MedicalRegistry {
         env.storage().persistent().set(&key, &map);
     }
 
-    pub fn revoke_access(env: Env, patient: Address, doctor: Address) {
-        patient.require_auth();
-        Self::require_not_on_hold(&env, &patient);
     pub fn revoke_access(env: Env, patient: Address, caller: Address, doctor: Address) {
         require_patient_or_guardian(&env, &patient, &caller);
+        Self::require_not_on_hold(&env, &patient);
 
         let key = DataKey::AuthorizedDoctors(patient.clone());
         let mut map: Map<Address, bool> = env
@@ -658,7 +656,7 @@ impl MedicalRegistry {
     fn require_admin(env: &Env) {
         let admin: Address = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::Admin)
             .expect("Contract not initialized");
         admin.require_auth();

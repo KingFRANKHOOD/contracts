@@ -5,7 +5,6 @@ use soroban_sdk::{
     testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
     Address, Bytes, BytesN, Env, IntoVal, String,
 };
-use soroban_sdk::{testutils::{Address as _, Ledger as _}, Address, Bytes, BytesN, Env, String};
 
 /// ------------------------------------------------
 /// PATIENT TESTS
@@ -77,6 +76,68 @@ fn test_is_patient_registered() {
 
     assert!(client.is_patient_registered(&patient_wallet));
     assert!(!client.is_patient_registered(&unregistered_wallet));
+}
+
+#[test]
+fn test_total_patients_increments_on_register() {
+    let env = Env::default();
+    let contract_id = env.register(MedicalRegistry, ());
+    let client = MedicalRegistryClient::new(&env, &contract_id);
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let fee_token = Address::generate(&env);
+    client.initialize(&admin, &treasury, &fee_token);
+
+    assert_eq!(client.get_total_patients(), 0);
+
+    client.register_patient(
+        &Address::generate(&env),
+        &String::from_str(&env, "P1"),
+        &631152000,
+        &String::from_str(&env, "ipfs://p1"),
+    );
+    assert_eq!(client.get_total_patients(), 1);
+
+    client.register_patient(
+        &Address::generate(&env),
+        &String::from_str(&env, "P2"),
+        &631152001,
+        &String::from_str(&env, "ipfs://p2"),
+    );
+    assert_eq!(client.get_total_patients(), 2);
+}
+
+#[test]
+fn test_total_patients_not_incremented_on_failed_register() {
+    let env = Env::default();
+    let contract_id = env.register(MedicalRegistry, ());
+    let client = MedicalRegistryClient::new(&env, &contract_id);
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let fee_token = Address::generate(&env);
+    client.initialize(&admin, &treasury, &fee_token);
+
+    let patient_wallet = Address::generate(&env);
+    client.register_patient(
+        &patient_wallet,
+        &String::from_str(&env, "P1"),
+        &631152000,
+        &String::from_str(&env, "ipfs://p1"),
+    );
+    assert_eq!(client.get_total_patients(), 1);
+
+    let duplicate_attempt = client.try_register_patient(
+        &patient_wallet,
+        &String::from_str(&env, "P1"),
+        &631152000,
+        &String::from_str(&env, "ipfs://p1"),
+    );
+    assert!(duplicate_attempt.is_err());
+    assert_eq!(client.get_total_patients(), 1);
 }
 
 /// ------------------------------------------------
@@ -239,7 +300,7 @@ fn test_admin_can_place_hold() {
     let patient = Address::generate(&env);
     let reason_hash = BytesN::from_array(&env, &[7u8; 32]);
 
-    client.initialize(&admin);
+    client.initialize(&admin, &Address::generate(&env), &Address::generate(&env));
     client.register_patient(
         &patient,
         &String::from_str(&env, "Jane Doe"),
@@ -281,7 +342,7 @@ fn test_non_admin_cannot_place_hold() {
                 sub_invokes: &[],
             },
         }])
-        .initialize(&admin);
+        .initialize(&admin, &Address::generate(&env), &Address::generate(&env));
 
     client
         .mock_auths(&[MockAuth {
@@ -322,7 +383,7 @@ fn test_admin_can_lift_hold() {
     let patient = Address::generate(&env);
     let reason_hash = BytesN::from_array(&env, &[8u8; 32]);
 
-    client.initialize(&admin);
+    client.initialize(&admin, &Address::generate(&env), &Address::generate(&env));
     client.register_patient(
         &patient,
         &String::from_str(&env, "Jane Doe"),
@@ -363,7 +424,7 @@ fn test_non_admin_cannot_lift_hold() {
                 sub_invokes: &[],
             },
         }])
-        .initialize(&admin);
+        .initialize(&admin, &Address::generate(&env), &Address::generate(&env));
 
     client
         .mock_auths(&[MockAuth {
@@ -416,7 +477,7 @@ fn test_hold_blocks_patient_update() {
     let patient = Address::generate(&env);
     let reason_hash = BytesN::from_array(&env, &[9u8; 32]);
 
-    client.initialize(&admin);
+    client.initialize(&admin, &Address::generate(&env), &Address::generate(&env));
     client.register_patient(
         &patient,
         &String::from_str(&env, "Jane Doe"),
@@ -425,7 +486,11 @@ fn test_hold_blocks_patient_update() {
     );
     client.place_hold(&patient, &reason_hash, &250);
 
-    let result = client.try_update_patient(&patient, &String::from_str(&env, "ipfs://blocked"));
+    let result = client.try_update_patient(
+        &patient,
+        &patient,
+        &String::from_str(&env, "ipfs://blocked"),
+    );
     assert!(result.is_err());
 }
 
@@ -442,7 +507,7 @@ fn test_hold_blocks_grant_and_revoke_access() {
     let doctor = Address::generate(&env);
     let reason_hash = BytesN::from_array(&env, &[10u8; 32]);
 
-    client.initialize(&admin);
+    client.initialize(&admin, &Address::generate(&env), &Address::generate(&env));
     client.register_patient(
         &patient,
         &String::from_str(&env, "Jane Doe"),
@@ -450,13 +515,14 @@ fn test_hold_blocks_grant_and_revoke_access() {
         &String::from_str(&env, "ipfs://initial"),
     );
 
-    client.grant_access(&patient, &doctor);
+    client.grant_access(&patient, &patient, &doctor);
     client.place_hold(&patient, &reason_hash, &250);
 
-    let grant_result = client.try_grant_access(&patient, &Address::generate(&env));
+    let grant_result =
+        client.try_grant_access(&patient, &patient, &Address::generate(&env));
     assert!(grant_result.is_err());
 
-    let revoke_result = client.try_revoke_access(&patient, &doctor);
+    let revoke_result = client.try_revoke_access(&patient, &patient, &doctor);
     assert!(revoke_result.is_err());
 }
 
@@ -473,7 +539,7 @@ fn test_write_succeeds_after_hold_expiry() {
     let reason_hash = BytesN::from_array(&env, &[11u8; 32]);
     let updated_metadata = String::from_str(&env, "ipfs://updated");
 
-    client.initialize(&admin);
+    client.initialize(&admin, &Address::generate(&env), &Address::generate(&env));
     client.register_patient(
         &patient,
         &String::from_str(&env, "Jane Doe"),
@@ -488,7 +554,7 @@ fn test_write_succeeds_after_hold_expiry() {
     env.ledger().set_timestamp(151);
     assert!(!client.is_hold_active(&patient));
 
-    client.update_patient(&patient, &updated_metadata);
+    client.update_patient(&patient, &patient, &updated_metadata);
     let patient_data = client.get_patient(&patient);
     assert_eq!(patient_data.metadata, updated_metadata);
 }
@@ -505,7 +571,7 @@ fn test_hold_exposes_only_reason_hash_in_state() {
     let patient = Address::generate(&env);
     let reason_hash = BytesN::from_array(&env, &[12u8; 32]);
 
-    client.initialize(&admin);
+    client.initialize(&admin, &Address::generate(&env), &Address::generate(&env));
     client.register_patient(
         &patient,
         &String::from_str(&env, "Jane Doe"),
@@ -535,7 +601,7 @@ fn test_lifting_hold_restores_normal_write_ability() {
     let reason_hash = BytesN::from_array(&env, &[13u8; 32]);
     let updated_metadata = String::from_str(&env, "ipfs://restored");
 
-    client.initialize(&admin);
+    client.initialize(&admin, &Address::generate(&env), &Address::generate(&env));
     client.register_patient(
         &patient,
         &String::from_str(&env, "Jane Doe"),
@@ -545,7 +611,7 @@ fn test_lifting_hold_restores_normal_write_ability() {
 
     client.place_hold(&patient, &reason_hash, &300);
     client.lift_hold(&patient);
-    client.update_patient(&patient, &updated_metadata);
+    client.update_patient(&patient, &patient, &updated_metadata);
 
     let patient_data = client.get_patient(&patient);
     assert_eq!(patient_data.metadata, updated_metadata);
@@ -563,7 +629,7 @@ fn test_invalid_hold_expiry_is_rejected() {
     let patient = Address::generate(&env);
     let reason_hash = BytesN::from_array(&env, &[14u8; 32]);
 
-    client.initialize(&admin);
+    client.initialize(&admin, &Address::generate(&env), &Address::generate(&env));
     client.register_patient(
         &patient,
         &String::from_str(&env, "Jane Doe"),
@@ -589,7 +655,7 @@ fn test_duplicate_active_hold_is_rejected() {
     let reason_hash = BytesN::from_array(&env, &[15u8; 32]);
     let second_reason_hash = BytesN::from_array(&env, &[16u8; 32]);
 
-    client.initialize(&admin);
+    client.initialize(&admin, &Address::generate(&env), &Address::generate(&env));
     client.register_patient(
         &patient,
         &String::from_str(&env, "Jane Doe"),
@@ -602,6 +668,7 @@ fn test_duplicate_active_hold_is_rejected() {
 
     let result = client.try_place_hold(&patient, &second_reason_hash, &300u64);
     assert!(result.is_err());
+}
 /// ------------------------------------------------
 /// CONSENT TESTS
 /// ------------------------------------------------
