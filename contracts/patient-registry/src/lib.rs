@@ -2,11 +2,19 @@
 #![allow(deprecated)]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Bytes, BytesN, Env, Map, String,
-    Vec,
     contract, contractimpl, contracttype, symbol_short, token, Address, Bytes, BytesN, Env, Map,
     String, Vec,
 };
+
+// =====================================================
+//                    TTL CONSTANTS
+// =====================================================
+
+/// Bump persistent entries by ~31 days (535,680 ledgers at ~5s/ledger).
+pub const LEDGER_BUMP_AMOUNT: u32 = 535_680;
+
+/// Extend TTL when fewer than ~30 days remain (518,400 ledgers).
+pub const LEDGER_THRESHOLD: u32 = 518_400;
 
 /// --------------------
 /// Patient Structures
@@ -54,7 +62,6 @@ pub enum DataKey {
     MedicalRecords(Address),
     AuthorizedDoctors(Address),
     RegulatoryHold(Address),
-    Admin,
     ConsentVersion,
     ConsentAck(Address),
     Guardian(Address),
@@ -81,6 +88,8 @@ pub struct RegulatoryHold {
     pub reason_hash: BytesN<32>,
     pub expires_at: u64,
     pub placed_at: u64,
+}
+
 fn require_patient_or_guardian(env: &Env, patient: &Address, caller: &Address) {
     let guardian_key = DataKey::Guardian(patient.clone());
     let guardian_opt: Option<Address> = env.storage().persistent().get(&guardian_key);
@@ -98,18 +107,6 @@ pub struct MedicalRegistry;
 
 #[contractimpl]
 impl MedicalRegistry {
-    pub fn initialize(env: Env, admin: Address) {
-        if env.storage().persistent().has(&DataKey::Admin) {
-            panic!("Contract already initialized");
-        }
-
-        admin.require_auth();
-        env.storage().persistent().set(&DataKey::Admin, &admin);
-
-        env.events()
-            .publish((symbol_short!("init"), admin), symbol_short!("success"));
-    }
-
     // =====================================================
     //                    ADMIN / CONSENT
     // =====================================================
@@ -167,8 +164,6 @@ impl MedicalRegistry {
             .get(&DataKey::Admin)
             .expect("Not initialized");
         admin.require_auth();
-        // Prevent a guardian from being assigned as guardian of another patient
-        // (no delegation chain: guardian must not itself have a guardian entry as a patient)
         env.storage()
             .persistent()
             .set(&DataKey::Guardian(patient.clone()), &guardian);
@@ -272,11 +267,9 @@ impl MedicalRegistry {
             .publish((symbol_short!("reg_pat"), wallet), symbol_short!("success"));
     }
 
-    pub fn update_patient(env: Env, wallet: Address, metadata: String) {
-        wallet.require_auth();
-        Self::require_not_on_hold(&env, &wallet);
     pub fn update_patient(env: Env, wallet: Address, caller: Address, metadata: String) {
         require_patient_or_guardian(&env, &wallet, &caller);
+        Self::require_not_on_hold(&env, &wallet);
 
         let key = DataKey::Patient(wallet.clone());
         let mut patient: PatientData = env
@@ -303,6 +296,70 @@ impl MedicalRegistry {
     pub fn is_patient_registered(env: Env, wallet: Address) -> bool {
         let key = DataKey::Patient(wallet);
         env.storage().persistent().has(&key)
+    }
+
+    /// Extend the TTL of all persistent storage entries for a patient.
+    /// Callable by the patient themselves or the contract admin.
+    pub fn extend_patient_ttl(env: Env, patient: Address) {
+        // Authorize: patient or admin
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+
+        let is_admin = admin == patient;
+        if is_admin {
+            patient.require_auth();
+        } else {
+            // Check if caller is the patient itself or a guardian
+            let guardian_key = DataKey::Guardian(patient.clone());
+            let guardian_opt: Option<Address> = env.storage().persistent().get(&guardian_key);
+            // We allow the patient or the admin — require patient auth here
+            // (admin path handled above, so this must be the patient)
+            let _ = guardian_opt; // not used here; only patient or admin may call
+            patient.require_auth();
+        }
+
+        // Extend Patient record TTL
+        let patient_key = DataKey::Patient(patient.clone());
+        if env.storage().persistent().has(&patient_key) {
+            env.storage().persistent().extend_ttl(
+                &patient_key,
+                LEDGER_THRESHOLD,
+                LEDGER_BUMP_AMOUNT,
+            );
+        }
+
+        // Extend MedicalRecords TTL
+        let records_key = DataKey::MedicalRecords(patient.clone());
+        if env.storage().persistent().has(&records_key) {
+            env.storage().persistent().extend_ttl(
+                &records_key,
+                LEDGER_THRESHOLD,
+                LEDGER_BUMP_AMOUNT,
+            );
+        }
+
+        // Extend AuthorizedDoctors TTL
+        let access_key = DataKey::AuthorizedDoctors(patient.clone());
+        if env.storage().persistent().has(&access_key) {
+            env.storage().persistent().extend_ttl(
+                &access_key,
+                LEDGER_THRESHOLD,
+                LEDGER_BUMP_AMOUNT,
+            );
+        }
+
+        // Extend ConsentAck TTL
+        let consent_key = DataKey::ConsentAck(patient.clone());
+        if env.storage().persistent().has(&consent_key) {
+            env.storage().persistent().extend_ttl(
+                &consent_key,
+                LEDGER_THRESHOLD,
+                LEDGER_BUMP_AMOUNT,
+            );
+        }
     }
 
     pub fn place_hold(env: Env, patient: Address, reason_hash: BytesN<32>, expires_at: u64) {
@@ -442,11 +499,9 @@ impl MedicalRegistry {
     //            MEDICAL RECORD ACCESS CONTROL
     // =====================================================
 
-    pub fn grant_access(env: Env, patient: Address, doctor: Address) {
-        patient.require_auth();
-        Self::require_not_on_hold(&env, &patient);
     pub fn grant_access(env: Env, patient: Address, caller: Address, doctor: Address) {
         require_patient_or_guardian(&env, &patient, &caller);
+        Self::require_not_on_hold(&env, &patient);
 
         let key = DataKey::AuthorizedDoctors(patient.clone());
         let mut map: Map<Address, bool> = env
@@ -459,11 +514,9 @@ impl MedicalRegistry {
         env.storage().persistent().set(&key, &map);
     }
 
-    pub fn revoke_access(env: Env, patient: Address, doctor: Address) {
-        patient.require_auth();
-        Self::require_not_on_hold(&env, &patient);
     pub fn revoke_access(env: Env, patient: Address, caller: Address, doctor: Address) {
         require_patient_or_guardian(&env, &patient, &caller);
+        Self::require_not_on_hold(&env, &patient);
 
         let key = DataKey::AuthorizedDoctors(patient.clone());
         let mut map: Map<Address, bool> = env
@@ -553,6 +606,37 @@ impl MedicalRegistry {
 
         records.push_back(record);
         env.storage().persistent().set(&records_key, &records);
+
+        // Extend TTL for all patient persistent entries after writing a record
+        Self::bump_patient_keys(&env, &patient);
+    }
+
+    pub fn get_medical_records(env: Env, patient: Address) -> Vec<MedicalRecord> {
+        let key = DataKey::MedicalRecords(patient.clone());
+
+        // Extend TTL on read to keep active records accessible
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().extend_ttl(
+                &key,
+                LEDGER_THRESHOLD,
+                LEDGER_BUMP_AMOUNT,
+            );
+        }
+
+        // Also bump the patient record itself
+        let patient_key = DataKey::Patient(patient.clone());
+        if env.storage().persistent().has(&patient_key) {
+            env.storage().persistent().extend_ttl(
+                &patient_key,
+                LEDGER_THRESHOLD,
+                LEDGER_BUMP_AMOUNT,
+            );
+        }
+
+        env.storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env))
     }
 
     // =====================================================
@@ -647,18 +731,14 @@ impl MedicalRegistry {
             .get(&DataKey::LastSnapshotLedger)
     }
 
-    pub fn get_medical_records(env: Env, patient: Address) -> Vec<MedicalRecord> {
-        let key = DataKey::MedicalRecords(patient);
-        env.storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(Vec::new(&env))
-    }
+    // =====================================================
+    //                  PRIVATE HELPERS
+    // =====================================================
 
     fn require_admin(env: &Env) {
         let admin: Address = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::Admin)
             .expect("Contract not initialized");
         admin.require_auth();
@@ -693,6 +773,26 @@ impl MedicalRegistry {
             None => None,
         }
     }
+
+    /// Bump TTL for all critical persistent keys belonging to a patient.
+    fn bump_patient_keys(env: &Env, patient: &Address) {
+        let keys: [DataKey; 4] = [
+            DataKey::Patient(patient.clone()),
+            DataKey::MedicalRecords(patient.clone()),
+            DataKey::AuthorizedDoctors(patient.clone()),
+            DataKey::ConsentAck(patient.clone()),
+        ];
+        for key in keys.iter() {
+            if env.storage().persistent().has(key) {
+                env.storage().persistent().extend_ttl(
+                    key,
+                    LEDGER_THRESHOLD,
+                    LEDGER_BUMP_AMOUNT,
+                );
+            }
+        }
+    }
 }
+
 #[cfg(test)]
 mod test;
