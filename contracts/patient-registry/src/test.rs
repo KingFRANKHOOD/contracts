@@ -363,6 +363,33 @@ fn test_validate_garbage_bytes_rejected() {
 }
 
 #[test]
+fn test_validate_did_ok() {
+    let env = Env::default();
+    let did = String::from_str(&env, "did:web:example.com");
+    assert!(validate_did(&did).is_ok());
+}
+
+#[test]
+fn test_validate_did_rejects_bad_prefix() {
+    let env = Env::default();
+    let did = String::from_str(&env, "notdid:web:x");
+    assert_eq!(validate_did(&did), Err(ContractError::InvalidDID));
+}
+
+#[test]
+fn test_validate_score_ok() {
+    assert!(validate_score(0).is_ok());
+    assert!(validate_score(100).is_ok());
+    assert!(validate_score(50).is_ok());
+}
+
+#[test]
+fn test_validate_score_rejects_out_of_range() {
+    assert_eq!(validate_score(-1), Err(ContractError::InvalidScore));
+    assert_eq!(validate_score(101), Err(ContractError::InvalidScore));
+}
+
+#[test]
 fn test_add_medical_record_rejects_invalid_cid() {
     let env = Env::default();
     let contract_id = env.register(MedicalRegistry, ());
@@ -1513,9 +1540,38 @@ fn make_ledger_info(sequence: u32, timestamp: u64) -> soroban_sdk::testutils::Le
 /// Shared setup for TTL tests: initialized contract + registered patient with consent + doctor.
 fn setup_for_ttl(
     env: &Env,
-) -> (MedicalRegistryClient, Address, Address, Address, BytesN<32>) {
+) -> (MedicalRegistryClient<'_>, Address, Address, Address, BytesN<32>) {
     let contract_id = env.register(MedicalRegistry, ());
     let client = MedicalRegistryClient::new(env, &contract_id);
+
+    let admin = Address::generate(env);
+    let treasury = Address::generate(env);
+    let fee_token = Address::generate(env);
+    let patient = Address::generate(env);
+    let doctor = Address::generate(env);
+    let v1 = make_version(env, 1);
+
+    env.mock_all_auths();
+
+    client.initialize(&admin, &treasury, &fee_token);
+    client.publish_consent_version(&v1);
+    client.register_patient(
+        &patient,
+        &String::from_str(env, "Alice"),
+        &631152000,
+        &String::from_str(env, "ipfs://alice"),
+    );
+    client.acknowledge_consent(&patient, &patient, &v1);
+    client.register_doctor(
+        &doctor,
+        &String::from_str(env, "Dr. Bob"),
+        &String::from_str(env, "Cardiology"),
+        &Bytes::from_array(env, &[1, 2, 3]),
+    );
+    client.grant_access(&patient, &patient, &doctor);
+
+    (client, admin, patient, doctor, v1)
+}
 
 /// GET_RECORDS_BY_TYPE TESTS
 /// ------------------------------------------------
@@ -1549,7 +1605,7 @@ fn setup_for_filter(env: &Env) -> (MedicalRegistryClient<'_>, Address, Address) 
     );
     client.grant_access(&patient, &patient, &doctor);
 
-    (client, admin, patient, doctor, v1)
+    (client, patient, doctor)
 }
 
 /// After `add_medical_record`, TTL on the MedicalRecords key must not be zero —
@@ -1560,10 +1616,15 @@ fn test_add_record_extends_patient_ttl() {
     env.ledger().set(make_ledger_info(100, 1_000_000));
 
     let (client, _admin, patient, doctor, _v1) = setup_for_ttl(&env);
-    client.acknowledge_consent(&patient, &patient, &v1);
-    client.grant_access(&patient, &patient, &doctor);
-
-    (client, patient, doctor)
+    client.add_medical_record(
+        &patient,
+        &doctor,
+        &make_cid_v1(&env, 5),
+        &String::from_str(&env, "Visit note"),
+        &Symbol::new(&env, "VISIT"),
+    );
+    let records = client.get_medical_records(&patient);
+    assert_eq!(records.len(), 1);
 }
 
 #[test]
@@ -1575,8 +1636,8 @@ fn test_get_records_by_type_returns_matching_records() {
         &patient,
         &doctor,
         &make_cid_v1(&env, 10),
-        &Bytes::from_array(&env, &[9, 8, 7]),
         &String::from_str(&env, "Checkup"),
+        &Symbol::new(&env, "VISIT"),
     );
 
     // Verify the records are still accessible after adding
@@ -1592,14 +1653,17 @@ fn test_get_records_extends_ttl() {
     env.ledger().set(make_ledger_info(100, 1_000_000));
 
     let (client, _admin, patient, doctor, _v1) = setup_for_ttl(&env);
-        &Bytes::from_array(&env, &[1, 1, 1]),
+    client.add_medical_record(
+        &patient,
+        &doctor,
+        &make_cid_v1(&env, 11),
         &String::from_str(&env, "CBC panel"),
         &Symbol::new(&env, "LAB"),
     );
     client.add_medical_record(
         &patient,
         &doctor,
-        &make_cid_v1(&env, 11),
+        &make_cid_v1(&env, 15),
         &String::from_str(&env, "Amoxicillin"),
         &Symbol::new(&env, "PRESCRIPTION"),
     );
@@ -1640,8 +1704,8 @@ fn test_get_records_by_type_returns_empty_when_no_match() {
         &patient,
         &doctor,
         &make_cid_v1(&env, 13),
-        &Bytes::from_array(&env, &[1, 2, 3]),
         &String::from_str(&env, "Initial record"),
+        &Symbol::new(&env, "VISIT"),
     );
 
     // Call get_medical_records — internally bumps TTL
@@ -1717,13 +1781,6 @@ fn test_ttl_constants_are_defined() {
     assert_eq!(LEDGER_BUMP_AMOUNT, 535_680);
     assert_eq!(LEDGER_THRESHOLD, 518_400);
     assert!(LEDGER_BUMP_AMOUNT > LEDGER_THRESHOLD);
-        &String::from_str(&env, "X-ray"),
-        &Symbol::new(&env, "IMAGING"),
-    );
-
-    // No PRESCRIPTION records exist — should return empty vec, not error
-    let result = client.get_records_by_type(&patient, &patient, &Symbol::new(&env, "PRESCRIPTION"));
-    assert_eq!(result.len(), 0);
 }
 
 #[test]
