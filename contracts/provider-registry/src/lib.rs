@@ -13,6 +13,8 @@ mod test;
 #[repr(u32)]
 pub enum ContractError {
     RateLimitExceeded = 1,
+    InvalidScore = 2,
+    AlreadyRated = 3,
 }
 
 #[contracttype]
@@ -38,6 +40,13 @@ pub struct Record {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderReputation {
+    pub total_ratings: u64,
+    pub total_score: u64,
+}
+
+#[contracttype]
 pub enum DataKey {
     Admin,
     Provider(Address),
@@ -45,6 +54,8 @@ pub enum DataKey {
     ProviderRecords(Address),
     RateLimitConfig,
     ProviderRate(Address),
+    ProviderReputation(Address),
+    ProviderRatingByPatient(Address, Address), // (provider, patient)
 }
 
 #[contract]
@@ -148,6 +159,69 @@ impl ProviderRegistry {
             .expect("Record not found")
     }
 
+    /// Rate a provider with score 1..=5.
+    /// A patient can only rate the same provider once.
+    pub fn rate_provider(
+        env: Env,
+        patient: Address,
+        provider: Address,
+        score: u32,
+    ) -> Result<(), ContractError> {
+        patient.require_auth();
+
+        if score < 1 || score > 5 {
+            return Err(ContractError::InvalidScore);
+        }
+        if !Self::is_provider(env.clone(), provider.clone()) {
+            panic!("Provider not found");
+        }
+
+        let patient_rating_key = DataKey::ProviderRatingByPatient(provider.clone(), patient);
+        if env.storage().persistent().has(&patient_rating_key) {
+            return Err(ContractError::AlreadyRated);
+        }
+
+        let reputation_key = DataKey::ProviderReputation(provider.clone());
+        let mut reputation: ProviderReputation = env
+            .storage()
+            .persistent()
+            .get(&reputation_key)
+            .unwrap_or(ProviderReputation {
+                total_ratings: 0,
+                total_score: 0,
+            });
+
+        reputation.total_ratings += 1;
+        reputation.total_score += score as u64;
+
+        env.storage()
+            .persistent()
+            .set(&patient_rating_key, &true);
+        env.storage().persistent().set(&reputation_key, &reputation);
+        env.events().publish(
+            (symbol_short!("rate"), provider),
+            (reputation.total_ratings, score),
+        );
+        Ok(())
+    }
+
+    /// Returns (total_ratings, average_score_scaled_by_100).
+    pub fn get_provider_reputation(env: Env, provider: Address) -> (u64, u64) {
+        let reputation_key = DataKey::ProviderReputation(provider);
+        let reputation: ProviderReputation = env
+            .storage()
+            .persistent()
+            .get(&reputation_key)
+            .unwrap_or(ProviderReputation {
+                total_ratings: 0,
+                total_score: 0,
+            });
+
+        if reputation.total_ratings == 0 {
+            return (0, 0);
+        }
+        let average_scaled = (reputation.total_score * 100) / reputation.total_ratings;
+        (reputation.total_ratings, average_scaled)
     /// Deactivate a provider: reassign all their records to `successor`,
     /// remove them from the whitelist, and emit deactivation events. Admin only.
     pub fn deactivate_provider(env: Env, admin: Address, provider: Address, successor: Address) {
