@@ -7,6 +7,7 @@ use soroban_sdk::{
 };
 
 pub mod validation;
+pub mod merkle;
 pub const NEW_RECORD_TOPIC: &str = "new_record";
 
 // =====================================================
@@ -869,6 +870,7 @@ impl MedicalRegistry {
             latest_version: 1u64,
         };
 
+        // Store record data (using cloned values)
         env.storage()
             .persistent()
             .set(&DataKey::MedicalRecord(record_id), &record_data);
@@ -969,7 +971,9 @@ impl MedicalRegistry {
     /// Returns an empty vec (not an error) when no records match.
     pub fn update_record(
         env: Env,
+        caller: Address,
         record_id: u64,
+        caller: Address,
         new_ipfs_hash: Bytes,
     ) -> Result<(), ContractError> {
         Self::require_not_frozen(&env);
@@ -979,7 +983,7 @@ impl MedicalRegistry {
             .storage()
             .persistent()
             .get(&record_key)
-            .ok_or(Error::NotFound)?;
+            .ok_or(ContractError::NotFound)?;
 
         let patient = record_data.patient.clone();
         Self::require_patient_exists(&env, &patient);
@@ -1011,7 +1015,12 @@ impl MedicalRegistry {
             .extend_ttl(&record_key, LEDGER_THRESHOLD, LEDGER_BUMP_AMOUNT);
 
         env.events()
-            .publish(symbol_short!("rec_updtd")(patient, caller));
+            .publish((
+                symbol_short!("rec_upd"),
+                (patient.clone(), caller.clone()),
+            ),
+            record_id,
+        );
 
         Ok(())
     }
@@ -1052,15 +1061,17 @@ impl MedicalRegistry {
 
         let mut filtered = Vec::new(&env);
         for id in record_ids.iter() {
-            if let Some(record_data) = env.storage().persistent().get(&DataKey::MedicalRecord(id)) {
+            let record_id: u64 = id.into();
+            if let Some(record_data) = env.storage().persistent().get::<DataKey, RecordData>(&DataKey::MedicalRecord(record_id)) {
                 if record_data.record_type == record_type {
                     // Map to MedicalRecord for compatibility
                     let mr = MedicalRecord {
+                        record_id,
                         doctor: record_data
                             .history
                             .get(0)
                             .map(|v| v.updated_by.clone())
-                            .unwrap_or(Address::generate(&env)),
+                            .unwrap_or_else(|| Address::from_str(&env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4")),
                         record_hash: record_data.current_ipfs.clone(),
                         description: record_data.description.clone(),
                         timestamp: record_data
@@ -1068,7 +1079,7 @@ impl MedicalRegistry {
                             .get(0)
                             .map(|v| v.updated_at)
                             .unwrap_or(0),
-                        record_type,
+                        record_type: record_type.clone(),
                     };
                     filtered.push_back(mr);
                 }
@@ -1489,14 +1500,28 @@ impl MedicalRegistry {
         }
     }
 
+    /// Recompute and persist the Merkle root for `patient` from their current
+    /// record-ID list.  Called by `add_medical_record` after every insertion.
+    fn update_merkle_root(env: &Env, patient: &Address, ids: &Vec<u64>) {
+        let root = merkle::compute_merkle_root(env, ids);
+        let root_key = DataKey::MerkleRoot(patient.clone());
+        env.storage().persistent().set(&root_key, &root);
+        env.storage().persistent().extend_ttl(
+            &root_key,
+            LEDGER_THRESHOLD,
+            LEDGER_BUMP_AMOUNT,
+        );
+    }
+
     /// Bump TTL for all critical persistent keys belonging to a patient.
     fn bump_patient_keys(env: &Env, patient: &Address) {
-        let keys: [DataKey; 5] = [
+        let keys: [DataKey; 6] = [
             DataKey::Patient(patient.clone()),
             DataKey::MedicalRecords(patient.clone()),
             DataKey::AuthorizedDoctors(patient.clone()),
             DataKey::PatientRecordIds(patient.clone()),
             DataKey::ConsentAck(patient.clone()),
+            DataKey::MerkleRoot(patient.clone()),
         ];
         for key in keys.iter() {
             if env.storage().persistent().has(key) {
