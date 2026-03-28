@@ -162,6 +162,7 @@ pub enum ContractError {
     InvalidDID = 2,
     InvalidScore = 3,
     ContractFrozen = 2,
+    NoRecordsFound = 4,
 }
 
 pub fn validate_cid(cid: &Bytes) -> Result<(), ContractError> {
@@ -852,6 +853,8 @@ impl MedicalRegistry {
                 h
             },
             latest_version: 1u64,
+        };
+
         let counter_key = DataKey::RecordCounter(patient.clone());
         let record_id: u64 = env
             .storage()
@@ -875,6 +878,17 @@ impl MedicalRegistry {
         env.storage()
             .persistent()
             .set(&DataKey::MedicalRecord(record_id), &record_data);
+
+        // Append to patient's medical record list for quick access
+        let mut records: Vec<MedicalRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MedicalRecords(patient.clone()))
+            .unwrap_or(Vec::new(&env));
+        records.push_back(record.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::MedicalRecords(patient.clone()), &records);
 
         // Append to patient's record IDs
         let ids_key = DataKey::PatientRecordIds(patient.clone());
@@ -957,6 +971,67 @@ impl MedicalRegistry {
             .persistent()
             .get(&key)
             .unwrap_or(Vec::new(&env))
+    }
+
+    pub fn get_latest_record(
+        env: Env,
+        patient: Address,
+        caller: Address,
+    ) -> Result<MedicalRecord, ContractError> {
+        // account for deregistered patient policy from get_medical_records
+        let patient_key = DataKey::Patient(patient.clone());
+        if let Some(data) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, PatientData>(&patient_key)
+        {
+            if data.status == PatientStatus::Deregistered {
+                let admin: Address = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::Admin)
+                    .expect("Not initialized");
+                if caller != admin {
+                    panic!("Records only accessible by admin after deregistration");
+                }
+            } else {
+                require_record_access(&env, &patient, &caller);
+            }
+        } else {
+            require_record_access(&env, &patient, &caller);
+        }
+
+        let key = DataKey::MedicalRecords(patient.clone());
+        let records: Vec<MedicalRecord> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
+
+        if records.is_empty() {
+            return Err(ContractError::NoRecordsFound);
+        }
+
+        // Bump TTL as in get_medical_records
+        if env.storage().persistent().has(&key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, LEDGER_THRESHOLD, LEDGER_BUMP_AMOUNT);
+        }
+        if env.storage().persistent().has(&patient_key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&patient_key, LEDGER_THRESHOLD, LEDGER_BUMP_AMOUNT);
+        }
+
+        let mut latest = records.get(0).unwrap().clone();
+        for r in records.iter() {
+            if r.timestamp > latest.timestamp {
+                latest = r.clone();
+            }
+        }
+
+        Ok(latest)
     }
 
     /// Returns all records for `patient` whose `record_type` matches the given symbol.
