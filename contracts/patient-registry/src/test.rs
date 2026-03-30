@@ -2165,6 +2165,59 @@ fn test_get_records_by_ids_unauthorized_caller_rejected() {
     assert!(result.is_err());
 }
 
+#[test]
+fn test_get_record_fields_full_access_for_patient() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000);
+
+    let (_admin, patient, doctor, client) = setup_with_record(&env);
+
+    let partial = client.get_record_fields(&patient, &patient, &1u64);
+
+    assert_eq!(partial.record_type, Some(Symbol::new(&env, "LAB")));
+    assert_eq!(partial.ipfs_hash, Some(make_cid_v1(&env, 1)));
+    assert_eq!(partial.created_at, Some(1_000));
+    assert_eq!(partial.created_by, Some(doctor));
+}
+
+#[test]
+fn test_get_record_fields_partial_access_for_grantee() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(2_000);
+
+    let (_admin, patient, doctor, client) = setup_with_record(&env);
+    let mut fields = Vec::new(&env);
+    fields.push_back(FieldPermission::RecordType);
+    fields.push_back(FieldPermission::CreatedAt);
+
+    client.grant_field_access(&patient, &doctor, &1u64, &fields);
+
+    let partial = client.get_record_fields(&patient, &doctor, &1u64);
+
+    assert_eq!(partial.record_type, Some(Symbol::new(&env, "LAB")));
+    assert_eq!(partial.created_at, Some(2_000));
+    assert_eq!(partial.ipfs_hash, None);
+    assert_eq!(partial.created_by, None);
+}
+
+#[test]
+fn test_get_record_fields_returns_none_when_no_access() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_admin, patient, _doctor, client) = setup_with_record(&env);
+    let stranger = Address::generate(&env);
+
+    let partial = client.get_record_fields(&patient, &stranger, &1u64);
+
+    assert_eq!(partial.record_type, None);
+    assert_eq!(partial.ipfs_hash, None);
+    assert_eq!(partial.created_at, None);
+    assert_eq!(partial.created_by, None);
+}
+
 /// ------------------------------------------------
 /// PROVIDER-TO-PATIENT RECORD NOTIFICATION EVENT TESTS
 /// ------------------------------------------------
