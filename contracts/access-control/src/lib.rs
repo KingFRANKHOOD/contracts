@@ -13,6 +13,7 @@ mod test;
 #[repr(u32)]
 pub enum ContractError {
     InvalidDidFormat = 1,
+    AlreadyInitialized = 2,
 }
 
 /// --------------------
@@ -73,15 +74,16 @@ impl AccessControl {
     ///
     /// # Arguments
     /// * `admin` - The admin address for the contract
-    pub fn initialize(env: Env, admin: Address) {
+    pub fn initialize(env: Env, admin: Address) -> Result<(), ContractError> {
         if env.storage().persistent().has(&DataKey::Admin) {
-            panic!("Contract already initialized");
+            return Err(ContractError::AlreadyInitialized);
         }
         admin.require_auth();
         env.storage().persistent().set(&DataKey::Admin, &admin);
 
         env.events()
             .publish((symbol_short!("init"), admin), symbol_short!("success"));
+        Ok(())
     }
 
     /// Register a new entity in the system

@@ -19,7 +19,6 @@ fn test_initialize() {
 }
 
 #[test]
-#[should_panic(expected = "Contract already initialized")]
 fn test_double_initialize() {
     let env = Env::default();
     env.mock_all_auths();
@@ -29,7 +28,9 @@ fn test_double_initialize() {
 
     let admin = Address::generate(&env);
     client.initialize(&admin);
-    client.initialize(&admin); // Should panic
+
+    let result = client.try_initialize(&admin);
+    assert_eq!(result, Err(Ok(ContractError::AlreadyInitialized)));
 }
 
 #[test]
