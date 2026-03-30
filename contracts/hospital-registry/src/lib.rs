@@ -201,7 +201,11 @@ impl HospitalRegistry {
             .storage()
             .persistent()
             .get(&key)
+
+            .unwrap_or_else(|| panic!("Hospital not found"));
+
             .ok_or(ContractError::HospitalNotFound)?;
+
 
         hospital.metadata = metadata;
         env.storage().persistent().set(&key, &hospital);
@@ -225,7 +229,11 @@ impl HospitalRegistry {
         env.storage()
             .persistent()
             .get(&key)
+
+            .unwrap_or_else(|| panic!("Hospital not found"))
+
             .ok_or(ContractError::HospitalNotFound)
+
     }
 
     /// Set full hospital configuration in one call
@@ -246,7 +254,11 @@ impl HospitalRegistry {
         env.storage()
             .persistent()
             .get(&key)
+
+            .unwrap_or_else(|| panic!("Hospital config not found"))
+
             .ok_or(ContractError::HospitalConfigNotFound)
+
     }
 
     pub fn update_departments(env: Env, wallet: Address, departments: Vec<Department>) -> Result<(), ContractError> {
@@ -258,7 +270,11 @@ impl HospitalRegistry {
             .storage()
             .persistent()
             .get(&key)
+
+            .unwrap_or_else(|| panic!("Hospital config not found"));
+
             .ok_or(ContractError::HospitalConfigNotFound)?;
+
 
         config.departments = departments;
         env.storage().persistent().set(&key, &config);
@@ -279,7 +295,11 @@ impl HospitalRegistry {
             .storage()
             .persistent()
             .get(&key)
+
+            .unwrap_or_else(|| panic!("Hospital config not found"));
+
             .ok_or(ContractError::HospitalConfigNotFound)?;
+
 
         config.locations = locations;
         env.storage().persistent().set(&key, &config);
@@ -298,7 +318,11 @@ impl HospitalRegistry {
             .storage()
             .persistent()
             .get(&key)
+
+            .unwrap_or_else(|| panic!("Hospital config not found"));
+
             .ok_or(ContractError::HospitalConfigNotFound)?;
+
 
         config.equipment = equipment;
         env.storage().persistent().set(&key, &config);
@@ -317,7 +341,11 @@ impl HospitalRegistry {
             .storage()
             .persistent()
             .get(&key)
+
+            .unwrap_or_else(|| panic!("Hospital config not found"));
+
             .ok_or(ContractError::HospitalConfigNotFound)?;
+
 
         config.policies = policies;
         env.storage().persistent().set(&key, &config);
@@ -336,7 +364,11 @@ impl HospitalRegistry {
             .storage()
             .persistent()
             .get(&key)
+
+            .unwrap_or_else(|| panic!("Hospital config not found"));
+
             .ok_or(ContractError::HospitalConfigNotFound)?;
+
 
         config.alerts = alerts;
         env.storage().persistent().set(&key, &config);
@@ -361,7 +393,11 @@ impl HospitalRegistry {
             .storage()
             .persistent()
             .get(&key)
+
+            .unwrap_or_else(|| panic!("Hospital config not found"));
+
             .ok_or(ContractError::HospitalConfigNotFound)?;
+
 
         config.insurance_providers = insurance_providers;
         env.storage().persistent().set(&key, &config);
@@ -380,7 +416,11 @@ impl HospitalRegistry {
             .storage()
             .persistent()
             .get(&key)
+
+            .unwrap_or_else(|| panic!("Hospital config not found"));
+
             .ok_or(ContractError::HospitalConfigNotFound)?;
+
 
         config.billing = billing;
         env.storage().persistent().set(&key, &config);
@@ -405,7 +445,11 @@ impl HospitalRegistry {
             .storage()
             .persistent()
             .get(&key)
+
+            .unwrap_or_else(|| panic!("Hospital config not found"));
+
             .ok_or(ContractError::HospitalConfigNotFound)?;
+
 
         config.emergency_protocols = protocols;
         env.storage().persistent().set(&key, &config);
