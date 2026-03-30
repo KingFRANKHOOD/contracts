@@ -106,6 +106,8 @@ pub enum DataKey {
     PatientRecordIds(Address),
     /// Individual record data keyed by global record ID.
     MedicalRecord(u64),
+    /// Field-level access mask keyed by (patient, grantee, record_id).
+    FieldAccess(Address, Address, u64),
     /// Platform-wide secondary index: record_type → Vec<TypeIndexEntry>.
     GlobalTypeIndex(Symbol),
     /// Soft-delete tombstone for a record (value: timestamp of deletion).
@@ -155,6 +157,24 @@ pub struct MedicalRecord {
     pub description: String,
     pub timestamp: u64,
     pub record_type: Symbol,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FieldPermission {
+    RecordType,
+    IpfsHash,
+    CreatedAt,
+    CreatedBy,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PartialRecord {
+    pub record_type: Option<Symbol>,
+    pub ipfs_hash: Option<Bytes>,
+    pub created_at: Option<u64>,
+    pub created_by: Option<Address>,
 }
 
 #[contracttype]
@@ -304,6 +324,60 @@ fn require_record_access(env: &Env, patient: &Address, caller: &Address) -> Resu
         return Ok(());
     }
     Err(ContractError::NotAuthorized)
+}
+
+const FIELD_RECORD_TYPE: u32 = 1 << 0;
+const FIELD_IPFS_HASH: u32 = 1 << 1;
+const FIELD_CREATED_AT: u32 = 1 << 2;
+const FIELD_CREATED_BY: u32 = 1 << 3;
+const FIELD_ALL: u32 = FIELD_RECORD_TYPE | FIELD_IPFS_HASH | FIELD_CREATED_AT | FIELD_CREATED_BY;
+
+fn field_permission_mask(fields: Vec<FieldPermission>) -> u32 {
+    let mut mask = 0u32;
+    for field in fields.iter() {
+        mask |= match field {
+            FieldPermission::RecordType => FIELD_RECORD_TYPE,
+            FieldPermission::IpfsHash => FIELD_IPFS_HASH,
+            FieldPermission::CreatedAt => FIELD_CREATED_AT,
+            FieldPermission::CreatedBy => FIELD_CREATED_BY,
+        };
+    }
+    mask
+}
+
+fn empty_partial_record() -> PartialRecord {
+    PartialRecord {
+        record_type: None,
+        ipfs_hash: None,
+        created_at: None,
+        created_by: None,
+    }
+}
+
+fn build_partial_record(record_data: &RecordData, mask: u32) -> PartialRecord {
+    let created = record_data.history.get(0);
+    PartialRecord {
+        record_type: if (mask & FIELD_RECORD_TYPE) != 0 {
+            Some(record_data.record_type.clone())
+        } else {
+            None
+        },
+        ipfs_hash: if (mask & FIELD_IPFS_HASH) != 0 {
+            Some(record_data.current_ipfs.clone())
+        } else {
+            None
+        },
+        created_at: if (mask & FIELD_CREATED_AT) != 0 {
+            created.as_ref().map(|version| version.updated_at)
+        } else {
+            None
+        },
+        created_by: if (mask & FIELD_CREATED_BY) != 0 {
+            created.map(|version| version.updated_by)
+        } else {
+            None
+        },
+    }
 }
 
 #[contract]
@@ -889,7 +963,44 @@ impl MedicalRegistry {
         Ok(())
     }
 
-    pub fn revoke_access(env: Env, patient: Address, caller: Address, doctor: Address) -> Result<(), ContractError> {
+    pub fn grant_field_access(
+        env: Env,
+        patient: Address,
+        grantee: Address,
+        record_id: u64,
+        fields: Vec<FieldPermission>,
+    ) -> Result<(), ContractError> {
+        Self::require_not_frozen(&env);
+        patient.require_auth();
+        Self::require_not_on_hold(&env, &patient);
+
+        let record_data: RecordData = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MedicalRecord(record_id))
+            .ok_or(ContractError::NotFound)?;
+        if record_data.patient != patient {
+            return Err(ContractError::NotAuthorized);
+        }
+
+        let access_key = DataKey::AuthorizedDoctors(patient.clone());
+        let access_map: Map<Address, bool> = env
+            .storage()
+            .persistent()
+            .get(&access_key)
+            .unwrap_or(Map::new(&env));
+        if !access_map.contains_key(grantee.clone()) {
+            return Err(ContractError::NotAuthorized);
+        }
+
+        let mask = field_permission_mask(fields);
+        env.storage()
+            .persistent()
+            .set(&DataKey::FieldAccess(patient, grantee, record_id), &mask);
+        Ok(())
+    }
+
+    pub fn revoke_access(env: Env, patient: Address, caller: Address, doctor: Address) {
         Self::require_not_frozen(&env);
         require_patient_or_guardian(&env, &patient, &caller)?;
         Self::require_not_on_hold(&env, &patient)?;
@@ -1313,6 +1424,50 @@ impl MedicalRegistry {
             .extend_ttl(&record_key, LEDGER_THRESHOLD, LEDGER_BUMP_AMOUNT);
 
         Ok(record_data.history)
+    }
+
+    pub fn get_record_fields(
+        env: Env,
+        patient: Address,
+        caller: Address,
+        record_id: u64,
+    ) -> PartialRecord {
+        caller.require_auth();
+
+        let record_data: RecordData = match env
+            .storage()
+            .persistent()
+            .get(&DataKey::MedicalRecord(record_id))
+        {
+            Some(record) => record,
+            None => return empty_partial_record(),
+        };
+        if record_data.patient != patient {
+            return empty_partial_record();
+        }
+
+        let guardian_key = DataKey::Guardian(patient.clone());
+        let guardian_opt: Option<Address> = env.storage().persistent().get(&guardian_key);
+        let mask = if caller == patient || guardian_opt.as_ref() == Some(&caller) {
+            FIELD_ALL
+        } else {
+            let access_key = DataKey::AuthorizedDoctors(patient.clone());
+            let access_map: Map<Address, bool> = env
+                .storage()
+                .persistent()
+                .get(&access_key)
+                .unwrap_or(Map::new(&env));
+            if !access_map.contains_key(caller.clone()) {
+                return empty_partial_record();
+            }
+
+            env.storage()
+                .persistent()
+                .get(&DataKey::FieldAccess(patient, caller, record_id))
+                .unwrap_or(0u32)
+        };
+
+        build_partial_record(&record_data, mask)
     }
 
     pub fn get_records_by_type(
