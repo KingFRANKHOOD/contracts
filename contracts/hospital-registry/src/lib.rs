@@ -188,7 +188,7 @@ impl HospitalRegistry {
             .storage()
             .persistent()
             .get(&key)
-            .expect("Hospital not found");
+            .unwrap_or_else(|| panic!("Hospital not found"));
 
         hospital.metadata = metadata;
         env.storage().persistent().set(&key, &hospital);
@@ -211,7 +211,7 @@ impl HospitalRegistry {
         env.storage()
             .persistent()
             .get(&key)
-            .expect("Hospital not found")
+            .unwrap_or_else(|| panic!("Hospital not found"))
     }
 
     /// Set full hospital configuration in one call
@@ -232,7 +232,7 @@ impl HospitalRegistry {
         env.storage()
             .persistent()
             .get(&key)
-            .expect("Hospital config not found")
+            .unwrap_or_else(|| panic!("Hospital config not found"))
     }
 
     pub fn update_departments(env: Env, wallet: Address, departments: Vec<Department>) {
@@ -244,7 +244,7 @@ impl HospitalRegistry {
             .storage()
             .persistent()
             .get(&key)
-            .expect("Hospital config not found");
+            .unwrap_or_else(|| panic!("Hospital config not found"));
 
         config.departments = departments;
         env.storage().persistent().set(&key, &config);
@@ -264,7 +264,7 @@ impl HospitalRegistry {
             .storage()
             .persistent()
             .get(&key)
-            .expect("Hospital config not found");
+            .unwrap_or_else(|| panic!("Hospital config not found"));
 
         config.locations = locations;
         env.storage().persistent().set(&key, &config);
@@ -282,7 +282,7 @@ impl HospitalRegistry {
             .storage()
             .persistent()
             .get(&key)
-            .expect("Hospital config not found");
+            .unwrap_or_else(|| panic!("Hospital config not found"));
 
         config.equipment = equipment;
         env.storage().persistent().set(&key, &config);
@@ -300,7 +300,7 @@ impl HospitalRegistry {
             .storage()
             .persistent()
             .get(&key)
-            .expect("Hospital config not found");
+            .unwrap_or_else(|| panic!("Hospital config not found"));
 
         config.policies = policies;
         env.storage().persistent().set(&key, &config);
@@ -318,7 +318,7 @@ impl HospitalRegistry {
             .storage()
             .persistent()
             .get(&key)
-            .expect("Hospital config not found");
+            .unwrap_or_else(|| panic!("Hospital config not found"));
 
         config.alerts = alerts;
         env.storage().persistent().set(&key, &config);
@@ -342,7 +342,7 @@ impl HospitalRegistry {
             .storage()
             .persistent()
             .get(&key)
-            .expect("Hospital config not found");
+            .unwrap_or_else(|| panic!("Hospital config not found"));
 
         config.insurance_providers = insurance_providers;
         env.storage().persistent().set(&key, &config);
@@ -360,7 +360,7 @@ impl HospitalRegistry {
             .storage()
             .persistent()
             .get(&key)
-            .expect("Hospital config not found");
+            .unwrap_or_else(|| panic!("Hospital config not found"));
 
         config.billing = billing;
         env.storage().persistent().set(&key, &config);
@@ -384,7 +384,7 @@ impl HospitalRegistry {
             .storage()
             .persistent()
             .get(&key)
-            .expect("Hospital config not found");
+            .unwrap_or_else(|| panic!("Hospital config not found"));
 
         config.emergency_protocols = protocols;
         env.storage().persistent().set(&key, &config);
