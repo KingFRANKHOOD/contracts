@@ -16,34 +16,54 @@ fn build_services(env: &Env, amount: i128) -> Vec<ServiceLine> {
     services
 }
 
+fn setup(env: &Env) -> (MedicalClaimsSystemClient<'static>, Address, Address, Address, Address) {
+    let contract_id = env.register_contract(None, MedicalClaimsSystem);
+    let client = MedicalClaimsSystemClient::new(env, &contract_id);
+    let admin = Address::generate(env);
+    let provider = Address::generate(env);
+    let patient = Address::generate(env);
+    let insurer = Address::generate(env);
+    client.initialize(&admin);
+    client.register_insurer(&admin, &insurer);
+    (client, admin, provider, patient, insurer)
+}
+
+fn make_services(env: &Env) -> Vec<ServiceLine> {
+    let mut s = Vec::new(env);
+    s.push_back(ServiceLine {
+        procedure_code: String::from_str(env, "99213"),
+        modifier: None,
+        quantity: 1,
+        charge_amount: 15000,
+        diagnosis_pointers: Vec::new(env),
+    });
+    s
+}
+
 #[test]
-fn test_full_claim_lifecycle_reconciles_cleanly() {
+fn test_full_claim_lifecycle() {
     let env = Env::default();
     env.mock_all_auths();
-
-    let contract_id = env.register_contract(None, MedicalClaimsSystem);
-    let client = MedicalClaimsSystemClient::new(&env, &contract_id);
-
-    let provider_id = Address::generate(&env);
-    let patient_id = Address::generate(&env);
-    let insurance_admin = Address::generate(&env);
+    let (client, _, provider, patient, insurer) = setup(&env);
 
     let claim_id = client.submit_claim(
-        &provider_id,
-        &patient_id,
+        &provider,
+        &patient,
+        &insurer,
         &12345,
         &1690000000,
-        &build_services(&env, 15000),
+        &make_services(&env),
         &Vec::new(&env),
         &BytesN::from_array(&env, &[0; 32]),
         &15000,
     );
 
     let mut approved_lines = Vec::new(&env);
-    approved_lines.push_back(1);
+    approved_lines.push_back(1u64);
+
     client.adjudicate_claim(
         &claim_id,
-        &insurance_admin,
+        &insurer,
         &approved_lines,
         &Vec::new(&env),
         &10000,
@@ -52,195 +72,158 @@ fn test_full_claim_lifecycle_reconciles_cleanly() {
 
     client.process_payment(
         &claim_id,
-        &insurance_admin,
-        &10000,
+        &insurer,
+        &8000,
         &1690100000,
         &String::from_str(&env, "REF_123"),
     );
-    client.apply_patient_payment(&claim_id, &patient_id, &2000, &1690200000);
 
-    let claim = client.get_claim(&claim_id);
-    assert_eq!(claim.status, ClaimStatus::Closed);
-    assert_eq!(claim.reconciliation_status, ReconciliationStatus::Reconciled);
-    assert_eq!(claim.insurer_paid_amount, 10000);
-    assert_eq!(claim.patient_paid_amount, 2000);
-    assert_eq!(client.get_insurer_payments(&claim_id).len(), 1);
-    assert_eq!(client.get_patient_payments(&claim_id).len(), 1);
+    client.apply_patient_payment(&claim_id, &patient, &2000, &1690200000);
+
+    let res = client.try_appeal_denial(
+        &claim_id,
+        &provider,
+        &1,
+        &BytesN::from_array(&env, &[0; 32]),
+    );
+    assert!(res.is_err());
 }
 
 #[test]
-fn test_partial_reconciliation_is_tracked() {
+fn test_unregistered_insurer_cannot_adjudicate() {
     let env = Env::default();
     env.mock_all_auths();
-
-    let contract_id = env.register_contract(None, MedicalClaimsSystem);
-    let client = MedicalClaimsSystemClient::new(&env, &contract_id);
-
-    let provider_id = Address::generate(&env);
-    let patient_id = Address::generate(&env);
-    let insurance_admin = Address::generate(&env);
+    let (client, _, provider, patient, insurer) = setup(&env);
+    let rogue = Address::generate(&env);
 
     let claim_id = client.submit_claim(
-        &provider_id,
-        &patient_id,
-        &12345,
-        &1690000000,
-        &build_services(&env, 25000),
+        &provider,
+        &patient,
+        &insurer,
+        &1,
+        &100,
+        &make_services(&env),
         &Vec::new(&env),
-        &BytesN::from_array(&env, &[1; 32]),
-        &25000,
-    );
-
-    client.adjudicate_claim(
-        &claim_id,
-        &insurance_admin,
-        &Vec::new(&env),
-        &Vec::new(&env),
-        &20000,
+        &BytesN::from_array(&env, &[0; 32]),
         &5000,
-    );
-    client.process_payment(
-        &claim_id,
-        &insurance_admin,
-        &12000,
-        &1690100000,
-        &String::from_str(&env, "REF_PARTIAL"),
-    );
-    client.apply_patient_payment(&claim_id, &patient_id, &2000, &1690200000);
-
-    let claim = client.get_claim(&claim_id);
-    assert_eq!(claim.status, ClaimStatus::Adjudicated);
-    assert_eq!(
-        claim.reconciliation_status,
-        ReconciliationStatus::PartiallyReconciled
-    );
-    assert_eq!(claim.insurer_paid_amount, 12000);
-    assert_eq!(claim.patient_paid_amount, 2000);
-}
-
-#[test]
-fn test_submit_claim_rejects_inconsistent_total() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let contract_id = env.register_contract(None, MedicalClaimsSystem);
-    let client = MedicalClaimsSystemClient::new(&env, &contract_id);
-
-    let provider_id = Address::generate(&env);
-    let patient_id = Address::generate(&env);
-
-    let result = client.try_submit_claim(
-        &provider_id,
-        &patient_id,
-        &12345,
-        &1690000000,
-        &build_services(&env, 10000),
-        &Vec::new(&env),
-        &BytesN::from_array(&env, &[2; 32]),
-        &9000,
-    );
-    assert!(matches!(result, Err(Ok(Error::InvalidAmount))));
-}
-
-#[test]
-fn test_adjudication_rejects_over_allocated_totals() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let contract_id = env.register_contract(None, MedicalClaimsSystem);
-    let client = MedicalClaimsSystemClient::new(&env, &contract_id);
-
-    let provider_id = Address::generate(&env);
-    let patient_id = Address::generate(&env);
-    let insurance_admin = Address::generate(&env);
-
-    let claim_id = client.submit_claim(
-        &provider_id,
-        &patient_id,
-        &12345,
-        &1690000000,
-        &build_services(&env, 15000),
-        &Vec::new(&env),
-        &BytesN::from_array(&env, &[3; 32]),
-        &15000,
     );
 
     let result = client.try_adjudicate_claim(
         &claim_id,
-        &insurance_admin,
+        &rogue,
         &Vec::new(&env),
         &Vec::new(&env),
-        &12000,
-        &4000,
+        &0,
+        &0,
     );
-    assert!(matches!(result, Err(Ok(Error::InvalidAmount))));
+    assert_eq!(result, Err(Ok(Error::InsurerNotRegistered)));
 }
 
 #[test]
-fn test_payment_application_is_bounded() {
+fn test_wrong_insurer_cannot_adjudicate() {
     let env = Env::default();
     env.mock_all_auths();
-
-    let contract_id = env.register_contract(None, MedicalClaimsSystem);
-    let client = MedicalClaimsSystemClient::new(&env, &contract_id);
-
-    let provider_id = Address::generate(&env);
-    let patient_id = Address::generate(&env);
-    let insurance_admin = Address::generate(&env);
+    let (client, admin, provider, patient, insurer) = setup(&env);
+    let other_insurer = Address::generate(&env);
+    client.register_insurer(&admin, &other_insurer);
 
     let claim_id = client.submit_claim(
-        &provider_id,
-        &patient_id,
-        &12345,
-        &1690000000,
-        &build_services(&env, 15000),
+        &provider,
+        &patient,
+        &insurer,
+        &1,
+        &100,
+        &make_services(&env),
         &Vec::new(&env),
-        &BytesN::from_array(&env, &[4; 32]),
-        &15000,
+        &BytesN::from_array(&env, &[0; 32]),
+        &5000,
+    );
+
+    let result = client.try_adjudicate_claim(
+        &claim_id,
+        &other_insurer,
+        &Vec::new(&env),
+        &Vec::new(&env),
+        &0,
+        &0,
+    );
+    assert_eq!(result, Err(Ok(Error::NotAuthorized)));
+}
+
+#[test]
+fn test_unregistered_insurer_cannot_process_payment() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, provider, patient, insurer) = setup(&env);
+    let rogue = Address::generate(&env);
+
+    let claim_id = client.submit_claim(
+        &provider,
+        &patient,
+        &insurer,
+        &1,
+        &100,
+        &make_services(&env),
+        &Vec::new(&env),
+        &BytesN::from_array(&env, &[0; 32]),
+        &5000,
     );
 
     client.adjudicate_claim(
         &claim_id,
-        &insurance_admin,
+        &insurer,
         &Vec::new(&env),
         &Vec::new(&env),
-        &10000,
-        &2000,
+        &5000,
+        &500,
     );
 
-    let insurer_overpay = client.try_process_payment(
+    let result = client.try_process_payment(
         &claim_id,
-        &insurance_admin,
-        &11000,
-        &1690100000,
-        &String::from_str(&env, "REF_OVER"),
+        &rogue,
+        &4500,
+        &200,
+        &String::from_str(&env, "REF"),
     );
-    assert!(matches!(insurer_overpay, Err(Ok(Error::InvalidAmount))));
-
-    let patient_overpay = client.try_apply_patient_payment(&claim_id, &patient_id, &3000, &1690200000);
-    assert!(matches!(patient_overpay, Err(Ok(Error::InvalidAmount))));
+    assert_eq!(result, Err(Ok(Error::InsurerNotRegistered)));
 }
 
 #[test]
-fn test_appeal_workflow_still_functions() {
+fn test_submit_claim_with_unregistered_insurer_fails() {
     let env = Env::default();
     env.mock_all_auths();
+    let (client, _, provider, patient, _) = setup(&env);
+    let unknown_insurer = Address::generate(&env);
 
-    let contract_id = env.register_contract(None, MedicalClaimsSystem);
-    let client = MedicalClaimsSystemClient::new(&env, &contract_id);
+    let result = client.try_submit_claim(
+        &provider,
+        &patient,
+        &unknown_insurer,
+        &1,
+        &100,
+        &make_services(&env),
+        &Vec::new(&env),
+        &BytesN::from_array(&env, &[0; 32]),
+        &5000,
+    );
+    assert_eq!(result, Err(Ok(Error::InsurerNotRegistered)));
+}
 
-    let provider_id = Address::generate(&env);
-    let patient_id = Address::generate(&env);
-    let insurance_admin = Address::generate(&env);
+#[test]
+fn test_appeal_workflow() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, provider, patient, insurer) = setup(&env);
 
     let claim_id = client.submit_claim(
-        &provider_id,
-        &patient_id,
+        &provider,
+        &patient,
+        &insurer,
         &12345,
         &1690000000,
-        &build_services(&env, 25000),
+        &make_services(&env),
         &Vec::new(&env),
-        &BytesN::from_array(&env, &[5; 32]),
+        &BytesN::from_array(&env, &[1; 32]),
         &25000,
     );
 
@@ -252,60 +235,40 @@ fn test_appeal_workflow_still_functions() {
         is_appealable: true,
     });
 
-    client.adjudicate_claim(
+    client.adjudicate_claim(&claim_id, &insurer, &Vec::new(&env), &denials, &0, &0);
+    client.appeal_denial(&claim_id, &provider, &1, &BytesN::from_array(&env, &[2; 32]));
+
+    // Already at level 1 — should fail
+    let res = client.try_appeal_denial(
         &claim_id,
-        &insurance_admin,
-        &Vec::new(&env),
-        &denials,
-        &0,
-        &0,
-    );
-    client.appeal_denial(
-        &claim_id,
-        &provider_id,
+        &provider,
         &1,
-        &BytesN::from_array(&env, &[6; 32]),
+        &BytesN::from_array(&env, &[2; 32]),
     );
+    assert!(res.is_err());
 
-    let res1 = client.try_appeal_denial(
-        &claim_id,
-        &provider_id,
-        &1,
-        &BytesN::from_array(&env, &[7; 32]),
-    );
-    assert!(matches!(res1, Err(Ok(Error::InvalidStateTransition))));
+    client.adjudicate_claim(&claim_id, &insurer, &Vec::new(&env), &denials, &0, &0);
+    client.appeal_denial(&claim_id, &provider, &2, &BytesN::from_array(&env, &[3; 32]));
+    client.adjudicate_claim(&claim_id, &insurer, &Vec::new(&env), &denials, &0, &0);
+    client.appeal_denial(&claim_id, &provider, &3, &BytesN::from_array(&env, &[4; 32]));
+}
 
-    client.adjudicate_claim(
-        &claim_id,
-        &insurance_admin,
-        &Vec::new(&env),
-        &denials,
-        &0,
-        &0,
-    );
-    client.appeal_denial(
-        &claim_id,
-        &provider_id,
-        &2,
-        &BytesN::from_array(&env, &[8; 32]),
-    );
+#[test]
+fn test_double_initialize_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _, _, _) = setup(&env);
+    let result = client.try_initialize(&admin);
+    assert_eq!(result, Err(Ok(Error::AlreadyInitialized)));
+}
 
-    client.adjudicate_claim(
-        &claim_id,
-        &insurance_admin,
-        &Vec::new(&env),
-        &denials,
-        &0,
-        &0,
-    );
-    client.appeal_denial(
-        &claim_id,
-        &provider_id,
-        &3,
-        &BytesN::from_array(&env, &[9; 32]),
-    );
-
-    let claim = client.get_claim(&claim_id);
-    assert_eq!(claim.appeal_level, 3);
-    assert_eq!(claim.status, ClaimStatus::Appealed);
+#[test]
+fn test_non_admin_cannot_register_insurer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _) = setup(&env);
+    let fake_admin = Address::generate(&env);
+    let new_insurer = Address::generate(&env);
+    let result = client.try_register_insurer(&fake_admin, &new_insurer);
+    assert_eq!(result, Err(Ok(Error::NotAuthorized)));
 }

@@ -8,8 +8,9 @@ pub enum Error {
     ClaimNotFound = 2,
     InvalidAppealLevel = 3,
     InvalidStateTransition = 4,
-    InvalidAmount = 5,
-    AmountOverflow = 6,
+    AlreadyInitialized = 5,
+    NotInitialized = 6,
+    InsurerNotRegistered = 7,
 }
 
 #[contracttype]
@@ -70,6 +71,7 @@ pub struct ClaimRecord {
     pub claim_id: u64,
     pub provider_id: Address,
     pub patient_id: Address,
+    pub insurer_id: Address, // bound payer identity
     pub policy_id: u64,
     pub service_date: u64,
     pub service_codes: Vec<ServiceLine>,
@@ -88,6 +90,8 @@ pub struct ClaimRecord {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
+    Admin,
+    Insurer(Address),        // insurer_id -> bool
     ClaimCounter,
     Claim(u64),
     DenialInfos(u64),
