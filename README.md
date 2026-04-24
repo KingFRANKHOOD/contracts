@@ -97,8 +97,8 @@ cargo install --locked stellar-cli
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/stellar-healthcare-system.git
-cd stellar-healthcare-system
+git clone https://github.com/KingFRANKHOOD/contracts.git
+cd contracts
 ```
 
 2. Install dependencies:
