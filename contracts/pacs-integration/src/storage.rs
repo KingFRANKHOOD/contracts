@@ -110,6 +110,51 @@ pub fn append_view_log(env: &Env, study_id: u64, record: &ViewRecord) {
         .extend_ttl(&key, LEDGER_THRESHOLD, LEDGER_BUMP_AMOUNT);
 }
 
+pub fn load_view_logs(env: &Env, study_id: u64) -> Vec<ViewRecord> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::ViewLog(study_id))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn save_viewer_last_view_timestamp(
+    env: &Env,
+    study_id: u64,
+    viewer_id: &Address,
+    view_timestamp: u64,
+) {
+    let key = DataKey::ViewerLastViewTs(study_id, viewer_id.clone());
+    env.storage().persistent().set(&key, &view_timestamp);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_AMOUNT);
+}
+
+pub fn load_viewer_last_view_timestamp(env: &Env, study_id: u64, viewer_id: &Address) -> Option<u64> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::ViewerLastViewTs(study_id, viewer_id.clone()))
+}
+
+pub fn save_viewer_view_chain_head(
+    env: &Env,
+    study_id: u64,
+    viewer_id: &Address,
+    entry_hash: &BytesN<32>,
+) {
+    let key = DataKey::ViewerViewChainHead(study_id, viewer_id.clone());
+    env.storage().persistent().set(&key, entry_hash);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_AMOUNT);
+}
+
+pub fn load_viewer_view_chain_head(env: &Env, study_id: u64, viewer_id: &Address) -> Option<BytesN<32>> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::ViewerViewChainHead(study_id, viewer_id.clone()))
+}
+
 pub fn save_qc_review(env: &Env, review: &QcReview) {
     let key = DataKey::QcReview(review.study_id);
     env.storage().persistent().set(&key, review);
