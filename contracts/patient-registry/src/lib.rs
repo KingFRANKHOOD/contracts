@@ -237,8 +237,8 @@ pub fn validate_cid(cid: &Bytes) -> Result<(), ContractError> {
         return Err(ContractError::InvalidCID);
     }
     let mut buf = [0u8; 512];
-    for i in 0..len {
-        buf[i] = cid.get(i as u32).ok_or(ContractError::InvalidCID)?;
+    for (i, slot) in buf[..len].iter_mut().enumerate() {
+        *slot = cid.get(i as u32).ok_or(ContractError::InvalidCID)?;
     }
     validation::validate_cid_bytes(&buf[..len]).map_err(|_| ContractError::InvalidCID)
 }
@@ -282,7 +282,7 @@ fn next_export_nonce(env: &Env, patient: &Address, issued_at: u64) -> BytesN<32>
     preimage.extend_from_array(&issued_at.to_be_bytes());
     preimage.extend_from_array(&nonce_counter.to_be_bytes());
 
-    env.crypto().sha256(&preimage)
+    env.crypto().sha256(&preimage).into()
 }
 
 fn sign_export_ticket(
@@ -298,7 +298,7 @@ fn sign_export_ticket(
     payload.extend_from_array(&expires_at.to_be_bytes());
     payload.append(&Bytes::from(nonce.clone()));
 
-    env.crypto().sha256(&payload)
+    env.crypto().sha256(&payload).into()
 }
 
 /// Enforces that `caller` is the patient, their guardian, or an authorized doctor.
@@ -446,7 +446,7 @@ impl MedicalRegistry {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("Not initialized");
+            .ok_or(ContractError::NotFound)?;
         admin.require_auth();
         if amount < 0 {
             return Err(ContractError::InvalidFee);
@@ -468,7 +468,7 @@ impl MedicalRegistry {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("Not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotFound));
         admin.require_auth();
         env.storage()
             .persistent()
@@ -483,7 +483,7 @@ impl MedicalRegistry {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("Not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotFound));
         admin.require_auth();
         env.storage()
             .persistent()
@@ -498,7 +498,7 @@ impl MedicalRegistry {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("Not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotFound));
         admin.require_auth();
         env.storage()
             .persistent()
@@ -525,7 +525,7 @@ impl MedicalRegistry {
             .storage()
             .persistent()
             .get(&DataKey::ConsentVersion)
-            .expect("No consent version published");
+            .ok_or(ContractError::NotFound)?;
         if current != version_hash {
             return Err(ContractError::ConsentVersionMismatch);
         }
@@ -713,7 +713,7 @@ impl MedicalRegistry {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("Not initialized");
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotFound));
 
         let is_admin = admin == patient;
         if is_admin {
@@ -972,7 +972,7 @@ impl MedicalRegistry {
     ) -> Result<(), ContractError> {
         Self::require_not_frozen(&env);
         patient.require_auth();
-        Self::require_not_on_hold(&env, &patient);
+        Self::require_not_on_hold(&env, &patient)?;
 
         let record_data: RecordData = env
             .storage()
@@ -1000,7 +1000,7 @@ impl MedicalRegistry {
         Ok(())
     }
 
-    pub fn revoke_access(env: Env, patient: Address, caller: Address, doctor: Address) {
+    pub fn revoke_access(env: Env, patient: Address, caller: Address, doctor: Address) -> Result<(), ContractError> {
         Self::require_not_frozen(&env);
         require_patient_or_guardian(&env, &patient, &caller)?;
         Self::require_not_on_hold(&env, &patient)?;
@@ -1068,12 +1068,12 @@ impl MedicalRegistry {
                 .storage()
                 .instance()
                 .get(&DataKey::FeeToken)
-                .expect("Fee token not configured");
+                .ok_or(ContractError::NotFound)?;
             let treasury: Address = env
                 .storage()
                 .instance()
                 .get(&DataKey::Treasury)
-                .expect("Treasury not configured");
+                .ok_or(ContractError::NotFound)?;
             token::TokenClient::new(&env, &token_id).transfer(&doctor, &treasury, &fee);
         }
 
@@ -1092,7 +1092,7 @@ impl MedicalRegistry {
 
         if !access_map.contains_key(doctor.clone()) {
             return Err(ContractError::NotAuthorized);
-        }     }
+        }
 
         let timestamp = env.ledger().timestamp();
 
@@ -1231,7 +1231,7 @@ impl MedicalRegistry {
                     .storage()
                     .instance()
                     .get(&DataKey::Admin)
-                    .expect("Not initialized");
+                    .ok_or(ContractError::NotFound)?;
                 if caller != admin {
                     return Err(ContractError::NotAuthorized);
                 }
@@ -1278,7 +1278,7 @@ impl MedicalRegistry {
                     .storage()
                     .instance()
                     .get(&DataKey::Admin)
-                    .expect("Not initialized");
+                    .ok_or(ContractError::NotFound)?;
                 if caller != admin {
                     return Err(ContractError::NotAuthorized);
                 }
@@ -1314,7 +1314,7 @@ impl MedicalRegistry {
             );
         }
 
-        let mut latest = records.get(0).unwrap().clone();
+        let mut latest = records.get(0).ok_or(ContractError::NoRecordsFound)?.clone();
         for r in records.iter() {
             if r.timestamp > latest.timestamp {
                 latest = r.clone();
@@ -1487,7 +1487,7 @@ impl MedicalRegistry {
 
         let mut filtered = Vec::new(&env);
         for id in record_ids.iter() {
-            let record_id: u64 = id.into();
+            let record_id: u64 = id;
             if let Some(record_data) = env
                 .storage()
                 .persistent()
@@ -1585,7 +1585,7 @@ impl MedicalRegistry {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("Not initialized");
+            .ok_or(ContractError::NotFound)?;
         admin.require_auth();
 
         const SNAPSHOT_INTERVAL: u32 = 100_000;
@@ -1927,7 +1927,7 @@ impl MedicalRegistry {
             .storage()
             .instance()
             .get(&DataKey::Admin)
-            .expect("Contract not initialized");
+            .unwrap_or_else(|| panic_with_error!(env, ContractError::NotFound));
         admin.require_auth();
     }
 
