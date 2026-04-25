@@ -1,7 +1,10 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::{testutils::Address as _, Address, Env, String};
+use soroban_sdk::{
+    testutils::{Address as _, MockAuth, MockAuthInvoke},
+    Address, Bytes, Env, IntoVal, String,
+};
 
 #[test]
 fn test_initialize() {
@@ -16,7 +19,6 @@ fn test_initialize() {
 }
 
 #[test]
-#[should_panic(expected = "Contract already initialized")]
 fn test_double_initialize() {
     let env = Env::default();
     env.mock_all_auths();
@@ -26,7 +28,9 @@ fn test_double_initialize() {
 
     let admin = Address::generate(&env);
     client.initialize(&admin);
-    client.initialize(&admin); // Should panic
+
+    let result = client.try_initialize(&admin);
+    assert_eq!(result, Err(Ok(ContractError::AlreadyInitialized)));
 }
 
 #[test]
@@ -53,7 +57,6 @@ fn test_register_entity() {
 }
 
 #[test]
-#[should_panic(expected = "Entity already registered")]
 fn test_duplicate_registration() {
     let env = Env::default();
     env.mock_all_auths();
@@ -69,7 +72,9 @@ fn test_duplicate_registration() {
     let metadata = String::from_str(&env, "General Hospital");
 
     client.register_entity(&hospital, &EntityType::Hospital, &name, &metadata);
-    client.register_entity(&hospital, &EntityType::Hospital, &name, &metadata); // Should panic
+
+    let result = client.try_register_entity(&hospital, &EntityType::Hospital, &name, &metadata);
+    assert_eq!(result, Err(Ok(ContractError::EntityAlreadyRegistered)));
 }
 
 #[test]
@@ -270,7 +275,6 @@ fn test_deactivate_entity() {
 }
 
 #[test]
-#[should_panic(expected = "Only admin can deactivate entities")]
 fn test_deactivate_entity_non_admin() {
     let env = Env::default();
     env.mock_all_auths();
@@ -291,8 +295,8 @@ fn test_deactivate_entity_non_admin() {
         &String::from_str(&env, "metadata"),
     );
 
-    // Non-admin tries to deactivate - should panic
-    client.deactivate_entity(&non_admin, &hospital);
+    let result = client.try_deactivate_entity(&non_admin, &hospital);
+    assert_eq!(result, Err(Ok(ContractError::OnlyAdminCanDeactivate)));
 }
 
 #[test]
@@ -320,4 +324,267 @@ fn test_update_entity() {
 
     let entity = client.get_entity(&hospital);
     assert_eq!(entity.metadata, new_metadata);
+}
+
+#[test]
+fn test_register_and_get_did() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(AccessControl, ());
+    let client = AccessControlClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let patient = Address::generate(&env);
+    client.initialize(&admin);
+
+    let did = Bytes::from_slice(&env, b"did:stellar:patient:abc123");
+    client.register_did(&patient, &did);
+
+    let stored = client.get_did(&patient).unwrap();
+    assert_eq!(stored, did);
+}
+
+#[test]
+fn test_register_did_invalid_format_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(AccessControl, ());
+    let client = AccessControlClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let provider = Address::generate(&env);
+    client.initialize(&admin);
+
+    let invalid = Bytes::from_slice(&env, b"stellar:provider:abc123");
+    let result = client.try_register_did(&provider, &invalid);
+    assert!(matches!(result, Err(Ok(ContractError::InvalidDidFormat))));
+}
+
+#[test]
+fn test_register_did_self_registration_only() {
+    let env = Env::default();
+    let contract_id = env.register(AccessControl, ());
+    let client = AccessControlClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let patient = Address::generate(&env);
+    let attacker = Address::generate(&env);
+
+    client
+        .mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "initialize",
+                args: (&admin,).into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .initialize(&admin);
+
+    let did = Bytes::from_slice(&env, b"did:stellar:patient:secure1");
+    let unauthorized = client
+        .mock_auths(&[MockAuth {
+            address: &attacker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "register_did",
+                args: (&patient, &did).into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .try_register_did(&patient, &did);
+
+    assert!(unauthorized.is_err());
+}
+
+#[test]
+fn test_register_did_update_replaces_value() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(AccessControl, ());
+    let client = AccessControlClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let provider = Address::generate(&env);
+    client.initialize(&admin);
+
+    let did_v1 = Bytes::from_slice(&env, b"did:stellar:provider:old");
+    let did_v2 = Bytes::from_slice(&env, b"did:stellar:provider:new");
+    client.register_did(&provider, &did_v1);
+    client.register_did(&provider, &did_v2);
+
+    let stored = client.get_did(&provider).unwrap();
+    assert_eq!(stored, did_v2);
+}
+
+#[test]
+fn test_grant_access_grantor_not_registered() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(AccessControl, ());
+    let client = AccessControlClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let unregistered = Address::generate(&env);
+    let doctor = Address::generate(&env);
+
+    client.register_entity(
+        &doctor,
+        &EntityType::Doctor,
+        &String::from_str(&env, "Dr. Smith"),
+        &String::from_str(&env, "metadata"),
+    );
+
+    let result = client.try_grant_access(
+        &unregistered,
+        &doctor,
+        &String::from_str(&env, "resource-1"),
+        &0,
+    );
+    assert_eq!(result, Err(Ok(ContractError::GrantorNotRegistered)));
+}
+
+#[test]
+fn test_grant_access_grantee_not_registered() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(AccessControl, ());
+    let client = AccessControlClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let hospital = Address::generate(&env);
+    let unregistered = Address::generate(&env);
+
+    client.register_entity(
+        &hospital,
+        &EntityType::Hospital,
+        &String::from_str(&env, "City Hospital"),
+        &String::from_str(&env, "metadata"),
+    );
+
+    let result = client.try_grant_access(
+        &hospital,
+        &unregistered,
+        &String::from_str(&env, "resource-1"),
+        &0,
+    );
+    assert_eq!(result, Err(Ok(ContractError::GranteeNotRegistered)));
+}
+
+#[test]
+fn test_grant_access_already_granted() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(AccessControl, ());
+    let client = AccessControlClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let hospital = Address::generate(&env);
+    let doctor = Address::generate(&env);
+
+    client.register_entity(
+        &hospital,
+        &EntityType::Hospital,
+        &String::from_str(&env, "City Hospital"),
+        &String::from_str(&env, "metadata"),
+    );
+    client.register_entity(
+        &doctor,
+        &EntityType::Doctor,
+        &String::from_str(&env, "Dr. Smith"),
+        &String::from_str(&env, "metadata"),
+    );
+
+    let resource = String::from_str(&env, "patient-records");
+    client.grant_access(&hospital, &doctor, &resource, &0);
+
+    let result = client.try_grant_access(&hospital, &doctor, &resource, &0);
+    assert_eq!(result, Err(Ok(ContractError::AccessAlreadyGranted)));
+}
+
+#[test]
+fn test_revoke_access_permission_not_found() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(AccessControl, ());
+    let client = AccessControlClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let hospital = Address::generate(&env);
+    let doctor = Address::generate(&env);
+
+    client.register_entity(
+        &hospital,
+        &EntityType::Hospital,
+        &String::from_str(&env, "City Hospital"),
+        &String::from_str(&env, "metadata"),
+    );
+    client.register_entity(
+        &doctor,
+        &EntityType::Doctor,
+        &String::from_str(&env, "Dr. Smith"),
+        &String::from_str(&env, "metadata"),
+    );
+
+    let result = client.try_revoke_access(
+        &hospital,
+        &doctor,
+        &String::from_str(&env, "nonexistent-resource"),
+    );
+    assert_eq!(result, Err(Ok(ContractError::AccessPermissionNotFound)));
+}
+
+#[test]
+fn test_revoke_access_not_authorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(AccessControl, ());
+    let client = AccessControlClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let hospital = Address::generate(&env);
+    let doctor = Address::generate(&env);
+    let other = Address::generate(&env);
+
+    client.register_entity(
+        &hospital,
+        &EntityType::Hospital,
+        &String::from_str(&env, "City Hospital"),
+        &String::from_str(&env, "metadata"),
+    );
+    client.register_entity(
+        &doctor,
+        &EntityType::Doctor,
+        &String::from_str(&env, "Dr. Smith"),
+        &String::from_str(&env, "metadata"),
+    );
+    client.register_entity(
+        &other,
+        &EntityType::Doctor,
+        &String::from_str(&env, "Dr. Other"),
+        &String::from_str(&env, "metadata"),
+    );
+
+    let resource = String::from_str(&env, "patient-records");
+    client.grant_access(&hospital, &doctor, &resource, &0);
+
+    // `other` is not the grantor and not the admin
+    let result = client.try_revoke_access(&other, &doctor, &resource);
+    assert_eq!(result, Err(Ok(ContractError::NotAuthorizedToRevoke)));
 }

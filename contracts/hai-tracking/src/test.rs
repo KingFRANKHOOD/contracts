@@ -136,7 +136,7 @@ fn test_record_organism_and_mdr_detection() {
 
     let case = client.get_infection_case(&infection_id);
     let org = case.organisms.get(0).unwrap();
-    assert_eq!(org.is_multidrug_resistant, true);
+    assert!(org.is_multidrug_resistant);
     assert_eq!(org.susceptibilities.len(), 3);
 }
 
@@ -261,19 +261,21 @@ fn test_isolation_and_active_lookup() {
     let (env, client) = setup();
     let patient = Address::generate(&env);
 
-    let id = client
-        .track_isolation_precaution(
-            &patient,
-            &Symbol::new(&env, "contact"),
-            &1_799_990_000,
-            &String::from_str(&env, "MRSA colonization"),
-            &String::from_str(&env, "3 negative cultures"),
-        );
+    let id = client.track_isolation_precaution(
+        &patient,
+        &Symbol::new(&env, "contact"),
+        &1_799_990_000,
+        &String::from_str(&env, "MRSA colonization"),
+        &String::from_str(&env, "3 negative cultures"),
+    );
     assert_eq!(id, 1);
 
     let active = client.get_active_isolations(&patient);
     assert_eq!(active.len(), 1);
-    assert_eq!(active.get(0).unwrap().precaution_type, Symbol::new(&env, "contact"));
+    assert_eq!(
+        active.get(0).unwrap().precaution_type,
+        Symbol::new(&env, "contact")
+    );
 }
 
 #[test]
@@ -364,13 +366,12 @@ fn test_reporting_stewardship_and_alert_priority_validation() {
         &202601,
     );
 
-    let ok = client.alert_infection_control_team(
+    client.alert_infection_control_team(
         &Symbol::new(&env, "outbreak"),
         &facility,
         &String::from_str(&env, "Cluster threshold exceeded"),
         &Symbol::new(&env, "high"),
     );
-    assert_eq!(ok, ());
 
     let bad_priority = client.try_alert_infection_control_team(
         &Symbol::new(&env, "outbreak"),

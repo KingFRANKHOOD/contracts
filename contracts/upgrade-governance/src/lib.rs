@@ -4,6 +4,21 @@ use soroban_sdk::{
     contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env, Vec,
 };
 
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum ContractError {
+    AlreadyInitialized = 1,
+    InvalidThreshold = 2,
+    NotInitialized = 3,
+    AlreadyVoted = 4,
+    ThresholdNotMet = 5,
+    ProposalNotFound = 6,
+    ProposalAlreadyExecuted = 7,
+    ProposalExpired = 8,
+    Unauthorized = 9,
+}
+
 mod test;
 
 pub const VOTING_WINDOW: u64 = 7 * 24 * 60 * 60;

@@ -1,7 +1,9 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::{testutils::Address as _, Address, Env, String};
+use soroban_sdk::{
+    testutils::Address as _, testutils::Ledger as _, Address, BytesN, Env, String,
+};
 
 fn setup() -> (Env, Address, ProviderRegistryClient<'static>) {
     let env = Env::default();
@@ -46,12 +48,31 @@ fn test_register_and_is_provider() {
 }
 
 #[test]
-fn test_revoke_provider() {
+fn test_register_provider_exposes_profile() {
+    let (env, admin, client) = setup();
+    let provider = Address::generate(&env);
+
+    register_provider_with_anchor(&env, &client, &admin, &provider);
+
+    let profile = client.get_provider_profile(&provider);
+    assert_eq!(profile.credential.credential_hash, dummy_hash(&env, 1));
+    assert_eq!(profile.credential.attestation_hash, dummy_hash(&env, 2));
+    assert_eq!(profile.credential.revocation_reference, dummy_hash(&env, 3));
+    assert!(profile.active);
+}
+
+#[test]
+fn test_revoke_provider_preserves_profile_but_disables_membership() {
     let (env, admin, client) = setup();
     let provider = Address::generate(&env);
     client.register_provider(&admin, &provider).unwrap();
     client.revoke_provider(&admin, &provider).unwrap();
     assert!(!client.is_provider(&provider));
+
+    let profile = client.get_provider_profile(&provider);
+    assert!(!profile.active);
+    assert!(profile.credential.revoked_at.is_some());
+    assert_eq!(profile.credential.revoked_by, Some(admin));
 }
 
 #[test]
@@ -91,6 +112,7 @@ fn test_add_record_by_whitelisted_provider() {
         client.get_record(&String::from_str(&env, "REC001")).unwrap(),
         String::from_str(&env, "Patient data")
     );
+    assert!(matches!(result, Err(Ok(ContractError::Unauthorized))));
 }
 
 #[test]

@@ -1,4 +1,6 @@
 #![no_std]
+#![allow(deprecated)]
+#![allow(clippy::too_many_arguments)]
 
 mod storage;
 mod types;
@@ -34,7 +36,7 @@ impl PacsContract {
     ) -> Result<u64, Error> {
         ordering_provider.require_auth();
 
-        if study_uid.len() == 0 || body_part.len() == 0 {
+        if study_uid.is_empty() || body_part.is_empty() {
             return Err(Error::InvalidInput);
         }
 
@@ -84,7 +86,7 @@ impl PacsContract {
         let mut study = load_study(&env, study_id).ok_or(Error::NotFound)?;
         study.ordering_provider.require_auth();
 
-        if series_uid.len() == 0 {
+        if series_uid.is_empty() {
             return Err(Error::InvalidInput);
         }
 
@@ -189,10 +191,8 @@ impl PacsContract {
             }
         }
 
-        env.events().publish(
-            (symbol_short!("cmp_req"), current_study_id),
-            radiologist_id,
-        );
+        env.events()
+            .publish((symbol_short!("cmp_req"), current_study_id), radiologist_id);
 
         Ok(matches)
     }
@@ -204,6 +204,7 @@ impl PacsContract {
         patient_id: Address,
         viewer_id: Address,
         access_type: Symbol,
+        purpose: String,
         expires_at: Option<u64>,
     ) -> Result<(), Error> {
         patient_id.require_auth();
@@ -212,23 +213,91 @@ impl PacsContract {
         if study.patient_id != patient_id {
             return Err(Error::Unauthorized);
         }
+        if purpose.is_empty() {
+            return Err(Error::InvalidInput);
+        }
+        if let Some(exp) = expires_at {
+            if exp <= env.ledger().timestamp() {
+                return Err(Error::InvalidInput);
+            }
+        }
 
         let grant = AccessGrant {
             viewer_id: viewer_id.clone(),
             access_type,
+            purpose: purpose.clone(),
             granted_at: env.ledger().timestamp(),
             expires_at,
+            revoked_at: None,
         };
 
-        let mut grants = load_access_list(&env, study_id);
-        grants.push_back(grant);
-        save_access_list(&env, study_id, &grants);
+        let grants = load_access_list(&env, study_id);
+        let mut updated_grants = Vec::new(&env);
+        let mut replaced = false;
+
+        for existing in grants.iter() {
+            if existing.viewer_id == viewer_id && existing.purpose == purpose {
+                if !replaced {
+                    updated_grants.push_back(grant.clone());
+                    replaced = true;
+                }
+                continue;
+            }
+            updated_grants.push_back(existing);
+        }
+
+        if !replaced {
+            updated_grants.push_back(grant);
+        }
+        save_access_list(&env, study_id, &updated_grants);
 
         env.events().publish(
             (symbol_short!("acc_grant"), study_id),
-            (patient_id, viewer_id),
+            (patient_id, viewer_id, purpose),
         );
 
+        Ok(())
+    }
+
+    /// Patient revokes a viewer's purpose-scoped access grant.
+    pub fn revoke_imaging_access(
+        env: Env,
+        study_id: u64,
+        patient_id: Address,
+        viewer_id: Address,
+        purpose: String,
+    ) -> Result<(), Error> {
+        patient_id.require_auth();
+
+        let study = load_study(&env, study_id).ok_or(Error::NotFound)?;
+        if study.patient_id != patient_id {
+            return Err(Error::Unauthorized);
+        }
+        if purpose.is_empty() {
+            return Err(Error::InvalidInput);
+        }
+
+        let grants = load_access_list(&env, study_id);
+        let mut updated_grants = Vec::new(&env);
+        let mut revoked = false;
+
+        for mut existing in grants.iter() {
+            if existing.viewer_id == viewer_id && existing.purpose == purpose && existing.revoked_at.is_none() {
+                existing.revoked_at = Some(env.ledger().timestamp());
+                revoked = true;
+            }
+            updated_grants.push_back(existing);
+        }
+
+        if !revoked {
+            return Err(Error::NotFound);
+        }
+
+        save_access_list(&env, study_id, &updated_grants);
+        env.events().publish(
+            (symbol_short!("acc_rev"), study_id),
+            (patient_id, viewer_id, purpose),
+        );
         Ok(())
     }
 
@@ -243,7 +312,7 @@ impl PacsContract {
     ) -> Result<u64, Error> {
         requesting_provider.require_auth();
 
-        if study_ids.len() == 0 || cd_token.len() == 0 {
+        if study_ids.is_empty() || cd_token.is_empty() {
             return Err(Error::InvalidInput);
         }
 
@@ -288,7 +357,7 @@ impl PacsContract {
         // study must exist
         load_study(&env, study_id).ok_or(Error::NotFound)?;
 
-        if purpose.len() == 0 {
+        if purpose.is_empty() {
             return Err(Error::InvalidInput);
         }
 
@@ -346,6 +415,7 @@ impl PacsContract {
         env: Env,
         study_id: u64,
         viewer_id: Address,
+        purpose: String,
         view_timestamp: u64,
         view_duration: u32,
     ) -> Result<(), Error> {
@@ -353,27 +423,10 @@ impl PacsContract {
 
         let study = load_study(&env, study_id).ok_or(Error::NotFound)?;
 
-        let is_owner =
-            study.patient_id == viewer_id || study.ordering_provider == viewer_id;
+        let is_owner = study.patient_id == viewer_id || study.ordering_provider == viewer_id;
 
         if !is_owner {
-            let now = env.ledger().timestamp();
-            let grants = load_access_list(&env, study_id);
-            let mut allowed = false;
-            for grant in grants.iter() {
-                if grant.viewer_id == viewer_id {
-                    if let Some(exp) = grant.expires_at {
-                        if now > exp {
-                            return Err(Error::AccessExpired);
-                        }
-                    }
-                    allowed = true;
-                    break;
-                }
-            }
-            if !allowed {
-                return Err(Error::Unauthorized);
-            }
+            Self::assert_active_grant(&env, study_id, &viewer_id, &purpose)?;
         }
 
         let record = ViewRecord {
@@ -398,11 +451,11 @@ impl PacsContract {
         env: Env,
         patient_id: Address,
         requester: Address,
+        access_purpose: String,
         filters: ImagingFilters,
     ) -> Result<Vec<ImagingStudy>, Error> {
         requester.require_auth();
 
-        let now = env.ledger().timestamp();
         let study_ids = load_patient_studies(&env, &patient_id);
         let mut results: Vec<ImagingStudy> = Vec::new(&env);
 
@@ -414,19 +467,7 @@ impl PacsContract {
                 let mut allowed = is_owner;
 
                 if !allowed {
-                    let grants = load_access_list(&env, sid);
-                    for grant in grants.iter() {
-                        if grant.viewer_id == requester {
-                            let active = match grant.expires_at {
-                                Some(exp) => now <= exp,
-                                None => true,
-                            };
-                            if active {
-                                allowed = true;
-                            }
-                            break;
-                        }
-                    }
+                    allowed = Self::assert_active_grant(&env, sid, &requester, &access_purpose).is_ok();
                 }
 
                 if !allowed {
@@ -465,5 +506,51 @@ impl PacsContract {
         }
 
         Ok(results)
+    }
+
+    /// Return grants for a study to the patient owner or ordering provider.
+    pub fn get_access_grants(
+        env: Env,
+        study_id: u64,
+        requester: Address,
+    ) -> Result<Vec<AccessGrant>, Error> {
+        requester.require_auth();
+
+        let study = load_study(&env, study_id).ok_or(Error::NotFound)?;
+        if requester != study.patient_id && requester != study.ordering_provider {
+            return Err(Error::Unauthorized);
+        }
+
+        Ok(load_access_list(&env, study_id))
+    }
+
+    fn assert_active_grant(
+        env: &Env,
+        study_id: u64,
+        viewer_id: &Address,
+        purpose: &String,
+    ) -> Result<(), Error> {
+        if purpose.is_empty() {
+            return Err(Error::InvalidInput);
+        }
+
+        let now = env.ledger().timestamp();
+        let grants = load_access_list(env, study_id);
+
+        for grant in grants.iter() {
+            if grant.viewer_id == *viewer_id && grant.purpose == *purpose {
+                if grant.revoked_at.is_some() {
+                    return Err(Error::GrantRevoked);
+                }
+                if let Some(exp) = grant.expires_at {
+                    if now > exp {
+                        return Err(Error::AccessExpired);
+                    }
+                }
+                return Ok(());
+            }
+        }
+
+        Err(Error::Unauthorized)
     }
 }

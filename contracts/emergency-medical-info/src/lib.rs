@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(clippy::too_many_arguments)]
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, Address, BytesN, Env, String, Symbol, Vec,
@@ -185,7 +186,7 @@ impl EmergencyMedicalInfo {
         env.storage()
             .persistent()
             .get(&profile_key)
-            .expect("Emergency profile not found")
+            .unwrap_or_else(|| panic!("Emergency profile not found"))
     }
 
     /// Notify emergency contacts
@@ -201,7 +202,7 @@ impl EmergencyMedicalInfo {
             .storage()
             .persistent()
             .get(&profile_key)
-            .expect("Emergency profile not found");
+            .unwrap_or_else(|| panic!("Emergency profile not found"));
 
         // Log notification
         let notif_key = DataKey::EmergencyNotifications(patient_id.clone());
@@ -261,7 +262,7 @@ impl EmergencyMedicalInfo {
         env.storage()
             .persistent()
             .get(&key)
-            .expect("Emergency profile not found")
+            .unwrap_or_else(|| panic!("Emergency profile not found"))
     }
 
     /// Get critical alerts for a patient

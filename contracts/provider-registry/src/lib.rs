@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(deprecated)]
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, contracterror, symbol_short, Address, Env, String,
@@ -27,6 +28,12 @@ pub enum DataKey {
     Admin,
     Provider(Address),
     Record(String),
+    ProviderRecords(Address),
+    ProviderRecordCount(Address),
+    RateLimitConfig,
+    ProviderRate(Address),
+    ProviderReputation(Address),
+    ProviderRatingByPatient(Address, Address),
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -49,7 +56,7 @@ impl ProviderRegistry {
         Self::assert_admin(&env, &admin)?;
         env.storage()
             .persistent()
-            .set(&DataKey::Provider(provider.clone()), &true);
+            .set(&DataKey::Provider(provider.clone()), &profile);
         env.events()
             .publish((symbol_short!("reg_prov"), provider), symbol_short!("ok"));
         Ok(())
@@ -60,17 +67,31 @@ impl ProviderRegistry {
         Self::assert_admin(&env, &admin)?;
         env.storage()
             .persistent()
-            .remove(&DataKey::Provider(provider.clone()));
+            .get(&key)
+            .ok_or(ContractError::NotFound)?;
+
+        profile.active = false;
+        profile.credential.revoked_at = Some(env.ledger().timestamp());
+        profile.credential.revoked_by = Some(admin.clone());
+        env.storage().persistent().set(&key, &profile);
+
         env.events()
             .publish((symbol_short!("rev_prov"), provider), symbol_short!("ok"));
         Ok(())
     }
 
     pub fn is_provider(env: Env, provider: Address) -> bool {
+        Self::provider_is_active(&env, &provider)
+    }
+
+    pub fn get_provider_profile(
+        env: Env,
+        provider: Address,
+    ) -> Result<ProviderProfile, ContractError> {
         env.storage()
             .persistent()
             .get(&DataKey::Provider(provider))
-            .unwrap_or(false)
+            .ok_or(ContractError::NotFound)
     }
 
     pub fn add_record(

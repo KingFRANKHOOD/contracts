@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, contracterror, Address, BytesN, String, Symbol, Vec};
+use soroban_sdk::{contracterror, contracttype, Address, BytesN, String, Symbol, Vec};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -10,6 +10,7 @@ pub enum Error {
     AlreadyExists = 4,
     AccessExpired = 5,
     ReportAlreadyExists = 6,
+    GrantRevoked = 7,
 }
 
 #[contracttype]
@@ -72,8 +73,10 @@ pub struct ImagingReport {
 pub struct AccessGrant {
     pub viewer_id: Address,
     pub access_type: Symbol,
+    pub purpose: String,
     pub granted_at: u64,
     pub expires_at: Option<u64>,
+    pub revoked_at: Option<u64>,
 }
 
 #[contracttype]
